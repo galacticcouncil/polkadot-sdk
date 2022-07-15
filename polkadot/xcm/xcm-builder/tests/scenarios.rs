@@ -16,13 +16,16 @@
 
 mod mock;
 
+use frame_support::weights::{Weight, constants::{WEIGHT_REF_TIME_PER_SECOND, WEIGHT_PROOF_SIZE_PER_MB}};
 use mock::{
-	fake_message_hash, kusama_like_with_balances, AccountId, Balance, Balances, BaseXcmWeight,
-	System, XcmConfig, CENTS,
+	fake_message_hash, kusama_like_with_balances, AccountId, Balance, Balances, System, BaseXcmWeight, KsmPerSecondPerByte,
+	XcmConfig, XcmPallet, CENTS,
 };
-use polkadot_parachain_primitives::primitives::Id as ParaId;
-use sp_runtime::traits::AccountIdConversion;
-use xcm::latest::prelude::*;
+use polkadot_parachain::primitives::Id as ParaId;
+use pretty_assertions::assert_eq;
+use sp_core::H256;
+use sp_runtime::traits::{AccountIdConversion, BlakeTwo256, Hash};
+use xcm::{latest::prelude::*, VersionedMultiAssets};
 use xcm_executor::XcmExecutor;
 
 pub const ALICE: AccountId = AccountId::new([0u8; 32]);
@@ -33,6 +36,24 @@ pub const REGISTER_AMOUNT: Balance = 10 * CENTS;
 // Construct a `BuyExecution` order.
 fn buy_execution<C>() -> Instruction<C> {
 	BuyExecution { fees: (Here, REGISTER_AMOUNT).into(), weight_limit: Unlimited }
+}
+
+// Calculate fees based on the weight.
+fn fees(weight: Weight) -> Balance {
+	let (_, units_per_second, units_per_mb) = KsmPerSecondPerByte::get();
+	let fees = weight.ref_time() as u128 * units_per_second / (WEIGHT_REF_TIME_PER_SECOND as u128)
+		+ weight.proof_size() as u128 * units_per_mb / (WEIGHT_PROOF_SIZE_PER_MB as u128);
+	assert!(fees > 0);
+	fees
+}
+
+// Determine the hash for assets expected to be have been trapped.
+fn determine_hash<M>(origin: &MultiLocation, assets: M) -> H256
+where
+	M: Into<MultiAssets>,
+{
+	let versioned = VersionedMultiAssets::from(assets.into());
+	BlakeTwo256::hash_of(&(origin, &versioned))
 }
 
 /// Scenario:
@@ -60,7 +81,7 @@ fn withdraw_and_deposit_works() {
 		assert_eq!(r, Outcome::Complete(weight));
 		let other_para_acc: AccountId = ParaId::from(other_para_id).into_account_truncating();
 		assert_eq!(Balances::free_balance(para_acc), INITIAL_BALANCE - amount);
-		assert_eq!(Balances::free_balance(other_para_acc), amount);
+		assert_eq!(Balances::free_balance(other_para_acc), amount - fees(weight));
 	});
 }
 
@@ -157,7 +178,7 @@ fn report_holding_works() {
 		let r = XcmExecutor::<XcmConfig>::execute_xcm(Parachain(PARA_ID), message, hash, weight);
 		assert_eq!(r, Outcome::Complete(weight));
 		let other_para_acc: AccountId = ParaId::from(other_para_id).into_account_truncating();
-		assert_eq!(Balances::free_balance(other_para_acc), amount);
+		assert_eq!(Balances::free_balance(other_para_acc), amount - fees(weight));
 		assert_eq!(Balances::free_balance(para_acc), INITIAL_BALANCE - 2 * amount);
 		let expected_msg = Xcm(vec![QueryResponse {
 			query_id: response_info.query_id,
@@ -183,7 +204,6 @@ fn report_holding_works() {
 /// Asserts that the balances are updated accordingly and the correct XCM is sent.
 #[test]
 fn teleport_to_statemine_works() {
-	use xcm::opaque::latest::prelude::*;
 	let para_acc: AccountId = ParaId::from(PARA_ID).into_account_truncating();
 	let balances = vec![(ALICE, INITIAL_BALANCE), (para_acc.clone(), INITIAL_BALANCE)];
 	kusama_like_with_balances(balances).execute_with(|| {
@@ -212,7 +232,8 @@ fn teleport_to_statemine_works() {
 		let hash = fake_message_hash(&message);
 		let r = XcmExecutor::<XcmConfig>::execute_xcm(Parachain(PARA_ID), message, hash, weight);
 		assert_eq!(r, Outcome::Complete(weight));
-		let expected_msg = Xcm(vec![ReceiveTeleportedAsset((Parent, amount).into()), ClearOrigin]
+		let amount_minus_fees = amount - fees(weight);
+		let expected_msg = Xcm(vec![ReceiveTeleportedAsset((Parent, amount_minus_fees).into()), ClearOrigin]
 			.into_iter()
 			.chain(teleport_effects.clone().into_iter())
 			.collect());
@@ -237,7 +258,7 @@ fn teleport_to_statemine_works() {
 		assert_eq!(r, Outcome::Complete(weight));
 		// 2 * amount because of the other teleport above
 		assert_eq!(Balances::free_balance(para_acc), INITIAL_BALANCE - 2 * amount);
-		let expected_msg = Xcm(vec![ReceiveTeleportedAsset((Parent, amount).into()), ClearOrigin]
+		let expected_msg = Xcm(vec![ReceiveTeleportedAsset((Parent, amount_minus_fees).into()), ClearOrigin]
 			.into_iter()
 			.chain(teleport_effects.clone().into_iter())
 			.collect());
@@ -260,7 +281,6 @@ fn teleport_to_statemine_works() {
 /// Asserts that the balances are updated accordingly and the correct XCM is sent.
 #[test]
 fn reserve_based_transfer_works() {
-	use xcm::opaque::latest::prelude::*;
 	let para_acc: AccountId = ParaId::from(PARA_ID).into_account_truncating();
 	let balances = vec![(ALICE, INITIAL_BALANCE), (para_acc.clone(), INITIAL_BALANCE)];
 	kusama_like_with_balances(balances).execute_with(|| {
@@ -287,7 +307,7 @@ fn reserve_based_transfer_works() {
 		let r = XcmExecutor::<XcmConfig>::execute_xcm(Parachain(PARA_ID), message, hash, weight);
 		assert_eq!(r, Outcome::Complete(weight));
 		assert_eq!(Balances::free_balance(para_acc), INITIAL_BALANCE - amount);
-		let expected_msg = Xcm(vec![ReserveAssetDeposited((Parent, amount).into()), ClearOrigin]
+		let expected_msg = Xcm(vec![ReserveAssetDeposited((Parent, amount - fees(weight)).into()), ClearOrigin]
 			.into_iter()
 			.chain(transfer_effects.into_iter())
 			.collect());
@@ -296,5 +316,127 @@ fn reserve_based_transfer_works() {
 			mock::sent_xcm(),
 			vec![(Parachain(other_para_id).into(), expected_msg, expected_hash,)]
 		);
+	});
+}
+
+/// Scenario:
+/// A parachain sends an XCM with an unknown asset to Kusama.
+///
+/// Asserts that asset ends up in the asset trap.
+#[test]
+fn unknown_tokens_are_trapped_on_failed_buy_execution() {
+	let para_acc: AccountId = ParaId::from(PARA_ID).into_account_truncating();
+	let balances = vec![(ALICE, INITIAL_BALANCE), (para_acc.clone(), INITIAL_BALANCE)];
+	kusama_like_with_balances(balances).execute_with(|| {
+		let amount = REGISTER_AMOUNT;
+		let weight = BaseXcmWeight::get() * 4;
+		let asset: MultiAsset = (Parachain(PARA_ID), amount).into();
+		let assets: MultiAssets = vec![asset.clone()].into();
+		let origin: MultiLocation = Parachain(PARA_ID).into();
+		let message = Xcm(vec![
+				ReserveAssetDeposited(assets.clone()),
+				ClearOrigin,
+				BuyExecution { fees: asset, weight_limit: Limited(weight) },
+				DepositAsset { assets: All.into(), beneficiary: Here.into() },
+			]);
+		let hash = fake_message_hash(&message);
+		let r = XcmExecutor::<XcmConfig>::execute_xcm(
+			origin.clone(),
+			message,
+			hash,
+			weight,
+		);
+		assert_eq!(r, Outcome::Incomplete(BaseXcmWeight::get() * 3, XcmError::TooExpensive));
+		let hash = determine_hash(&origin, assets);
+		assert_eq!(XcmPallet::asset_trap(hash), 1);
+	});
+}
+
+/// Scenario:
+/// Statemine sends an XCM with KSM and two unknown assets to Kusama.
+///
+/// Note: This is a bit of a convoluted way of triggering the error in `deposit_asset` and does not
+/// represent a realistic scenario that would be encountered in practice.
+///
+/// Asserts that those unknown tokens end up in the asset trap.
+#[test]
+fn unknown_tokens_are_trapped_on_failed_deposit() {
+	let statemine_id = 1000;
+	let para_acc: AccountId = ParaId::from(statemine_id).into_account_truncating();
+	let balances = vec![(ALICE, INITIAL_BALANCE), (para_acc.clone(), INITIAL_BALANCE)];
+	kusama_like_with_balances(balances).execute_with(|| {
+		let amount = REGISTER_AMOUNT;
+		let weight = BaseXcmWeight::get() * 4;
+		let para_asset: MultiAsset = (X2(Parachain(statemine_id), GeneralIndex(1)), amount).into();
+		let other_para_asset: MultiAsset =
+			(X2(Parachain(statemine_id), GeneralIndex(2)), amount).into();
+		let ksm: MultiAsset = (Here, amount).into();
+		let assets: MultiAssets =
+			vec![ksm.clone(), para_asset.clone(), other_para_asset.clone()].into();
+		let origin: MultiLocation = Parachain(statemine_id).into();
+		let message = Xcm(vec![
+				ReserveAssetDeposited(assets.clone()),
+				ClearOrigin,
+				BuyExecution { fees: ksm, weight_limit: Limited(weight) },
+				DepositAsset {
+					assets: All.into(),
+					beneficiary: Parachain(statemine_id).into(),
+				},
+			]);
+		let hash = fake_message_hash(&message);
+		let r = XcmExecutor::<XcmConfig>::execute_xcm(
+			origin.clone(),
+			message,
+			hash,
+			weight,
+		);
+		assert_eq!(r, Outcome::Incomplete(BaseXcmWeight::get() * 4, XcmError::AssetNotFound));
+		let hash = determine_hash(&origin, vec![para_asset.clone(), other_para_asset.clone()]);
+		assert_eq!(XcmPallet::asset_trap(hash), 1);
+	});
+}
+
+/// Scenario:
+/// Statemine sends an XCM with KSM and two unknown assets to Kusama.
+///
+/// Note: This is a bit of a convoluted way of triggering the error in `deposit_asset` and does not
+/// represent a realistic scenario that would be encountered in practice.
+///
+/// Asserts that those funds end up in the asset trap.
+#[test]
+fn unknown_tokens_are_trapped_on_failed_reserve_deposit() {
+	let statemine_id = 1000;
+	let para_acc: AccountId = ParaId::from(statemine_id).into_account_truncating();
+	let balances = vec![(ALICE, INITIAL_BALANCE), (para_acc.clone(), INITIAL_BALANCE)];
+	kusama_like_with_balances(balances).execute_with(|| {
+		let amount = REGISTER_AMOUNT;
+		let weight = BaseXcmWeight::get() * 4;
+		let para_asset: MultiAsset = (X2(Parachain(statemine_id), GeneralIndex(1)), amount).into();
+		let other_para_asset: MultiAsset =
+			(X2(Parachain(statemine_id), GeneralIndex(2)), amount).into();
+		let ksm: MultiAsset = (Here, amount).into();
+		let assets: MultiAssets =
+			vec![ksm.clone(), para_asset.clone(), other_para_asset.clone()].into();
+		let origin: MultiLocation = Parachain(statemine_id).into();
+		let message = Xcm(vec![
+				ReserveAssetDeposited(assets.clone()),
+				ClearOrigin,
+				BuyExecution { fees: ksm, weight_limit: Limited(weight) },
+				DepositReserveAsset {
+					assets: All.into(),
+					dest: Parachain(statemine_id).into(),
+					xcm: Xcm(vec![]),
+				},
+			]);
+		let hash = fake_message_hash(&message);
+		let r = XcmExecutor::<XcmConfig>::execute_xcm(
+			origin.clone(),
+			message,
+			hash,
+			weight,
+		);
+		assert_eq!(r, Outcome::Incomplete(BaseXcmWeight::get() * 4, XcmError::AssetNotFound));
+		let hash = determine_hash(&origin, vec![para_asset.clone(), other_para_asset.clone()]);
+		assert_eq!(XcmPallet::asset_trap(hash), 1);
 	});
 }

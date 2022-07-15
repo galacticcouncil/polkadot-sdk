@@ -20818,6 +20818,8 @@ dependencies = [
  "polkadot-parachain-primitives",
  "polkadot-primitives",
  "polkadot-runtime-parachains",
+ "pretty_assertions",
+ "scale-info",
  "sp-arithmetic",
  "sp-core",
  "sp-io",
