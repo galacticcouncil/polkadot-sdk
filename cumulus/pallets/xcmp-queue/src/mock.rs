@@ -28,6 +28,7 @@ use sp_runtime::{
 	traits::{BlakeTwo256, IdentityLookup},
 	BuildStorage,
 };
+use sp_std::cell::RefCell;
 use xcm::prelude::*;
 use xcm_builder::{CurrencyAdapter, FixedWeightBounds, IsConcrete, NativeAsset, ParentIsPreset};
 use xcm_executor::traits::ConvertOrigin;
@@ -111,7 +112,7 @@ impl cumulus_pallet_parachain_system::Config for Test {
 	type XcmpMessageHandler = XcmpQueue;
 	type ReservedXcmpWeight = ();
 	type CheckAssociatedRelayNumber = AnyRelayNumber;
-	type ConsensusHook = cumulus_pallet_parachain_system::consensus_hook::ExpectParentIncluded;
+	// type ConsensusHook = cumulus_pallet_parachain_system::consensus_hook::ExpectParentIncluded;
 }
 
 parameter_types! {
@@ -138,6 +139,8 @@ pub type LocalAssetTransactor = CurrencyAdapter<
 
 pub type LocationToAccountId = (ParentIsPreset<AccountId>,);
 
+pub type FixedWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+
 pub struct XcmConfig;
 impl xcm_executor::Config for XcmConfig {
 	type RuntimeCall = RuntimeCall;
@@ -149,7 +152,7 @@ impl xcm_executor::Config for XcmConfig {
 	type IsTeleporter = NativeAsset;
 	type UniversalLocation = UniversalLocation;
 	type Barrier = ();
-	type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+	type Weigher = FixedWeigher;
 	type Trader = ();
 	type ResponseHandler = ();
 	type AssetTrap = ();
@@ -196,19 +199,102 @@ impl<RuntimeOrigin: OriginTrait> ConvertOrigin<RuntimeOrigin>
 	}
 }
 
+pub struct XcmDeferFilterMock;
+
+impl XcmDeferFilter<RuntimeCall> for XcmDeferFilterMock {
+	fn deferred_by(
+		_para: ParaId,
+		_sent_at: RelayBlockNumber,
+		xcm: &VersionedXcm<RuntimeCall>,
+	) -> (Weight, Option<RelayBlockNumber>) {
+		let xcm = Xcm::<RuntimeCall>::try_from(xcm.clone()).unwrap();
+		let first = xcm.first().unwrap();
+		match first {
+			ClearError => (Weight::default(), None),
+			ClearOrigin => (Weight::default(), Some(5)),
+			ReserveAssetDeposited(_) => (Weight::default(), Some(5)),
+			RefundSurplus => (Weight::default(), Some(42)),
+			_ => (Weight::default(), Some(1_000_000)),
+		}
+	}
+}
+
+parameter_types! {
+	pub const MaxDeferredMessages: u32 = 20;
+	pub const MaxDeferredBuckets: u32 = 10;
+}
+
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type XcmExecutor = xcm_executor::XcmExecutor<XcmConfig>;
 	type ChannelInfo = ParachainSystem;
 	type VersionWrapper = ();
 	type ExecuteOverweightOrigin = EnsureRoot<AccountId>;
+	type ExecuteDeferredOrigin = EnsureRoot<AccountId>;
 	type ControllerOrigin = EnsureRoot<AccountId>;
 	type ControllerOriginConverter = SystemParachainAsSuperuser<RuntimeOrigin>;
 	type WeightInfo = ();
 	type PriceForSiblingDelivery = ();
+	type XcmDeferFilter = XcmDeferFilterMock;
+	type MaxDeferredMessages = MaxDeferredMessages;
+	type MaxDeferredBuckets = MaxDeferredBuckets;
+	type RelayChainBlockNumberProvider = RelayBlockNumberProviderMock;
+}
+
+thread_local! {
+	pub static RELAY_BLOCK: RefCell<RelayBlockNumber> = RefCell::new(0);
+}
+
+pub struct RelayBlockNumberProviderMock;
+impl RelayBlockNumberProviderMock {
+	pub fn set(b: RelayBlockNumber) {
+		RELAY_BLOCK.with(|block| *block.borrow_mut() = b)
+	}
+}
+
+impl BlockNumberProvider for RelayBlockNumberProviderMock {
+	type BlockNumber = RelayBlockNumber;
+
+	fn current_block_number() -> RelayBlockNumber {
+		RELAY_BLOCK.with(|b| *b.borrow())
+	}
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
 	let t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
-	t.into()
+	
+	let mut r: sp_io::TestExternalities = t.into();
+
+	r.execute_with(|| System::set_block_number(1));
+
+	r
 }
+
+pub fn create_versioned_reserve_asset_deposited() -> VersionedXcm<RuntimeCall> {
+	VersionedXcm::from(Xcm::<RuntimeCall>(vec![Instruction::<RuntimeCall>::ReserveAssetDeposited(
+		MultiAssets::new(),
+	)]))
+}
+
+pub fn format_message(msg: &mut Vec<u8>, encoded_xcm: Vec<u8>) -> &[u8] {
+	msg.extend(XcmpMessageFormat::ConcatenatedVersionedXcm.encode());
+	msg.extend(encoded_xcm.clone());
+	msg
+}
+
+pub fn create_bounded_vec<T>(deferred_xcm_messages: Vec<T>) -> BoundedVec<T, MaxDeferredMessages>
+where
+	T: core::fmt::Debug,
+{
+	deferred_xcm_messages.try_into().unwrap()
+}
+
+use sp_std::collections::btree_set::BTreeSet;
+pub fn create_bounded_btreeset<I>(
+	iter: I,
+) -> BoundedBTreeSet<(RelayBlockNumber, u16), MaxDeferredBuckets>
+where
+	I: Iterator<Item = (RelayBlockNumber, u16)>,
+{
+	BTreeSet::from_iter(iter).try_into().unwrap()
+ }
