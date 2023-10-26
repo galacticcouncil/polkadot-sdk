@@ -20,7 +20,8 @@ use cumulus_pallet_parachain_system::AnyRelayNumber;
 use cumulus_primitives_core::{IsSystem, ParaId};
 use frame_support::{
 	parameter_types,
-	traits::{ConstU32, Everything, Nothing, OriginTrait},
+	traits::{ConstU32, Everything, Nothing, OriginTrait, ProcessMessageError},
+	weights::constants::RocksDbWeight,
 };
 use frame_system::EnsureRoot;
 use sp_core::H256;
@@ -32,6 +33,8 @@ use sp_std::cell::RefCell;
 use xcm::prelude::*;
 use xcm_builder::{CurrencyAdapter, FixedWeightBounds, IsConcrete, NativeAsset, ParentIsPreset};
 use xcm_executor::traits::ConvertOrigin;
+use xcm_executor::traits::ShouldExecute;
+use xcm_executor::traits::Properties;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -59,7 +62,7 @@ impl frame_system::Config for Test {
 	type BaseCallFilter = Everything;
 	type BlockWeights = ();
 	type BlockLength = ();
-	type DbWeight = ();
+	type DbWeight = RocksDbWeight;
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeCall = RuntimeCall;
 	type Nonce = u64;
@@ -139,6 +142,20 @@ pub type LocalAssetTransactor = CurrencyAdapter<
 
 pub type LocationToAccountId = (ParentIsPreset<AccountId>,);
 
+// A mock barrier that allows all executions.
+pub struct BarrierMock {}
+
+impl ShouldExecute for BarrierMock {
+	fn should_execute<RuntimeCall>(
+		_origin: &MultiLocation,
+		_instructions: &mut [Instruction<RuntimeCall>],
+		_max_weight: Weight,
+		_weight_credit: &mut Properties,
+	) -> Result<(), ProcessMessageError> {
+		Ok(())
+	}
+}
+
 pub type FixedWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
 
 pub struct XcmConfig;
@@ -151,7 +168,7 @@ impl xcm_executor::Config for XcmConfig {
 	type IsReserve = NativeAsset;
 	type IsTeleporter = NativeAsset;
 	type UniversalLocation = UniversalLocation;
-	type Barrier = ();
+	type Barrier = BarrierMock;
 	type Weigher = FixedWeigher;
 	type Trader = ();
 	type ResponseHandler = ();
