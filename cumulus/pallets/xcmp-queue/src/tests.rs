@@ -581,10 +581,9 @@ fn service_deferred_queues_should_pass_overweight_messages_to_overweight_queue()
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max_inidividual_weight to trigger the overweight logic
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_individual_weight = Weight::from_parts(100, 1);
 		let low_max_weight =
-			low_max_individual_weight.saturating_add(db_weights.reads_writes(2, 2));
+			low_max_individual_weight.saturating_add(<Test as Config>::WeightInfo::service_deferred());
 		assert!(FixedWeigher::weight(&mut xcm).unwrap().any_gt(low_max_weight));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
@@ -625,10 +624,9 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max weight to stop processing deferred messages early
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(db_weights.reads_writes(2, 2));
+			.saturating_add(<Test as Config>::WeightInfo::service_deferred());
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let second_para_id = ParaId::from(1000);
@@ -684,10 +682,9 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max weight to stop processing deferred messages early
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(db_weights.reads_writes(2, 2));
+			.saturating_add(<Test as Config>::WeightInfo::service_deferred());
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let mut xcmp_message = Vec::new();

@@ -157,6 +157,9 @@ pub mod pallet {
 		/// The maximum number of deferred message buckets per parachain.
 		type MaxDeferredBuckets: Get<u32>;
 
+		/// The maximum number of deferred message buckets processed per parachain.
+		type MaxBucketsProcessed: Get<u32>;
+
 		/// Relay chain block number provider to allow processing deferred messages on idle
 		type RelayChainBlockNumberProvider: BlockNumberProvider<BlockNumber = RelayBlockNumber>;
 
@@ -1167,12 +1170,13 @@ impl<T: Config> Pallet<T> {
 
 				let (sent_at, format) = status[index].message_metadata[0];
 
-				let weight_used_for_queue = Self::service_deferred_queue(
-					sender,
-					weight_remaining,
-					sent_at,
-					xcmp_max_individual_weight,
-				);
+				
+				let weight_used_for_queue = if T::WeightInfo::service_deferred().any_gte(weight_remaining) {
+					Weight::zero()
+				} else {
+					T::WeightInfo::service_deferred().saturating_add(
+						Self::service_deferred_queue(sender, weight_remaining, sent_at, xcmp_max_individual_weight))
+				};
 				let weight_remaining = weight_remaining.saturating_sub(weight_used_for_queue);
 
 				let (weight_processed, is_empty) = Self::process_xcmp_message(
@@ -1232,8 +1236,10 @@ impl<T: Config> Pallet<T> {
 		}
 		let mut keys = DeferredIndices::<T>::iter_keys();
 		let mut processed_all_queues = false;
-		while !processed_all_queues && max_weight.all_gt(weight_used) {
+		let service_queue_weight = T::WeightInfo::service_deferred();
+		while !processed_all_queues && max_weight.all_gt(weight_used.saturating_add(service_queue_weight)) {
 			if let Some(sender) = keys.next() {
+				weight_used.saturating_accrue(service_queue_weight);
 				weight_used.saturating_accrue(Self::service_deferred_queue(
 					sender,
 					max_weight.saturating_sub(weight_used),
@@ -1255,19 +1261,16 @@ impl<T: Config> Pallet<T> {
 		up_to_relay_block_number: RelayBlockNumber,
 		max_individual_weight: Weight,
 	) -> Weight {
-		let mut weight_used = Weight::zero();
 		if QueueSuspended::<T>::get() || DeferredQueueSuspended::<T>::get() {
-			return weight_used;
+			return Weight::zero();
 		}
+		let mut weight_used = Weight::zero();
 
-		weight_used.saturating_accrue(T::DbWeight::get().reads_writes(1, 1));
 		let mut indices = DeferredIndices::<T>::take(sender);
-
 		let indices_to_process =
 			indices.range((Included(&(0, 0)), Included(&(up_to_relay_block_number, u16::MAX))));
 		let mut processed = BTreeSet::new();
-		for index in indices_to_process {
-			weight_used.saturating_accrue(T::DbWeight::get().reads_writes(1, 1));
+		for index in indices_to_process.take(T::MaxBucketsProcessed::get() as usize) {
 			if weight_used.any_gte(max_weight) {
 				break;
 			}

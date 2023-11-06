@@ -239,6 +239,7 @@ impl XcmDeferFilter<RuntimeCall> for XcmDeferFilterMock {
 parameter_types! {
 	pub const MaxDeferredMessages: u32 = 20;
 	pub const MaxDeferredBuckets: u32 = 10;
+	pub const MaxBucketsProcessed: u32 = 5;
 }
 
 impl Config for Test {
@@ -255,6 +256,7 @@ impl Config for Test {
 	type XcmDeferFilter = XcmDeferFilterMock;
 	type MaxDeferredMessages = MaxDeferredMessages;
 	type MaxDeferredBuckets = MaxDeferredBuckets;
+	type MaxBucketsProcessed = MaxBucketsProcessed;
 	type RelayChainBlockNumberProvider = RelayBlockNumberProviderMock;
 }
 

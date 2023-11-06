@@ -54,25 +54,30 @@ benchmarks! {
 		// We set `deferred_to` to the current relay block number to make sure that the messages are serviced.
 		let deferred_message = DeferredMessage { sent_at: relay_block, deferred_to: relay_block, sender: para_id, xcm };
 		let deferred_xcm_messages = vec![deferred_message.clone(); max_messages];
-		crate::Pallet::<T>::inject_deferred_messages(para_id, (relay_block, 0), deferred_xcm_messages.try_into().unwrap());
+		let max_processed = T::MaxBucketsProcessed::get() as u16;
+		for i in 0..max_processed {
+			crate::Pallet::<T>::inject_deferred_messages(para_id, (relay_block, i), deferred_xcm_messages.clone().try_into().unwrap());
+			assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, i)).len(), max_messages);
+		}
 		let max_buckets = T::MaxDeferredBuckets::get();
-		let indices: Vec<DeferredIndex> = (1..(max_buckets)).map(|i| (relay_block, i as u16)).collect();
+		let indices: Vec<DeferredIndex> = (max_processed..(max_buckets as u16)).map(|i| (relay_block, i)).collect();
 		crate::Pallet::<T>::inject_bare_deferred_indices(para_id, indices);
-		assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, 0)).len(), max_messages);
 		assert_eq!(crate::Pallet::<T>::deferred_indices(para_id).len(), max_buckets as usize);
 		// TODO: figure out how to get the weight of the xcm in a production runtime (Weigher not available)
 		let weight = Weight::from_parts(1_000_000 - 1_000, 1024);
 		assert!(crate::Pallet::<T>::update_xcmp_max_individual_weight(RawOrigin::Root.into(), weight).is_ok());
 		// account for the reads induced by trying to execute all `max_messages`
-		let weight_limit = weight.saturating_add(T::DbWeight::get().reads_writes(max_messages as u64 + 2, 2));
+		let weight_limit = weight.saturating_add(T::DbWeight::get().reads_writes((max_processed as usize * max_messages) as u64, 0));
 	} :_(RawOrigin::Root, weight_limit, para_id)
 	verify
 	{
 		assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, 0)).len(), 0);
-		assert_eq!(crate::Pallet::<T>::deferred_indices(para_id).len(), max_buckets as usize - 1);
+		assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, max_processed - 1)).len(), 0);
+		assert_eq!(crate::Pallet::<T>::deferred_indices(para_id).len(), (max_buckets - max_processed as u32) as usize);
 		// worst case is placing the message in overweight, so check that they end up there
 		assert!(Overweight::<T>::contains_key(0));
 		assert!(Overweight::<T>::contains_key((max_messages - 1) as u64));
+		assert!(Overweight::<T>::contains_key((max_processed as usize * max_messages - 1) as u64));
 	}
 	discard_deferred_bucket {
 		let para_id = ParaId::from(999);
