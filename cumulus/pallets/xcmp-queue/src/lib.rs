@@ -442,7 +442,7 @@ pub mod pallet {
 		/// - `para_id`: The queue to service.
 		/// - `max_processed`: The maximum number of buckets to process.
 		#[pallet::call_index(15)]
-		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), *max_processed)), DispatchClass::Operational))]
+		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(*max_processed)), DispatchClass::Operational))]
 		pub fn service_deferred(
 			origin: OriginFor<T>,
 			weight_limit: Weight,
@@ -461,7 +461,7 @@ pub mod pallet {
 				xcmp_max_individual_weight,
 				max_processed as usize,
 			);
-			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed))).into())
+			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(max_processed))).into())
 		}
 	}
 
@@ -1181,10 +1181,10 @@ impl<T: Config> Pallet<T> {
 				let (sent_at, format) = status[index].message_metadata[0];
 
 				let max_processed = T::MaxBucketsProcessed::get();
-				let weight_used_for_queue = if T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed).any_gte(weight_remaining) {
+				let weight_used_for_queue = if T::WeightInfo::service_deferred(max_processed).any_gte(weight_remaining) {
 					Weight::zero()
 				} else {
-					T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed).saturating_add(
+					T::WeightInfo::service_deferred(max_processed).saturating_add(
 						Self::service_deferred_queue(
 							sender,
 							weight_remaining,
@@ -1252,8 +1252,7 @@ impl<T: Config> Pallet<T> {
 		}
 		let mut keys = DeferredIndices::<T>::iter_keys();
 		let mut processed_all_queues = false;
-		let service_queue_weight = T::WeightInfo::service_deferred(
-			T::MaxDeferredMessages::get(), T::MaxBucketsProcessed::get());
+		let service_queue_weight = T::WeightInfo::service_deferred(T::MaxBucketsProcessed::get());
 		while !processed_all_queues && max_weight.all_gt(weight_used.saturating_add(service_queue_weight)) {
 			if let Some(sender) = keys.next() {
 				weight_used.saturating_accrue(service_queue_weight);

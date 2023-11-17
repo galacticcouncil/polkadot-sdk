@@ -45,11 +45,10 @@ benchmarks! {
 	set_config_with_u32 {}: update_resume_threshold(RawOrigin::Root, 100)
 	set_config_with_weight {}: update_weight_restrict_decay(RawOrigin::Root, Weight::from_parts(3_000_000, 0))
 	service_deferred {
-		let m in 1..T::MaxDeferredMessages::get();
 		let b in 1..T::MaxBucketsProcessed::get();
 
-		let max_messages = m as usize;
 		let max_processed = b as u16;
+		let max_messages = T::MaxDeferredMessages::get() as usize;
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
