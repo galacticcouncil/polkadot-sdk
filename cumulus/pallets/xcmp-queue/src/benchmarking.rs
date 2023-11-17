@@ -45,11 +45,13 @@ benchmarks! {
 	set_config_with_u32 {}: update_resume_threshold(RawOrigin::Root, 100)
 	set_config_with_weight {}: update_weight_restrict_decay(RawOrigin::Root, Weight::from_parts(3_000_000, 0))
 	service_deferred {
+		let m in 1..T::MaxDeferredMessages::get();
+
+		let max_messages = m as usize;
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
 
-		let max_messages = T::MaxDeferredMessages::get() as usize;
 		let relay_block = T::RelayChainBlockNumberProvider::current_block_number();
 		// We set `deferred_to` to the current relay block number to make sure that the messages are serviced.
 		let deferred_message = DeferredMessage { sent_at: relay_block, deferred_to: relay_block, sender: para_id, xcm };
@@ -80,6 +82,10 @@ benchmarks! {
 		assert!(Overweight::<T>::contains_key((max_processed as usize * max_messages - 1) as u64));
 	}
 	discard_deferred_bucket {
+		let m in 1..T::MaxDeferredMessages::get();
+
+		let max_messages = m as usize;
+
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
@@ -87,7 +93,6 @@ benchmarks! {
 
 		let sent_at = 1;
 		let deferred_to = 6;
-		let max_messages = T::MaxDeferredMessages::get() as usize;
 		let deferred_message = DeferredMessage { sent_at, deferred_to, sender: para_id, xcm };
 		let deferred_xcm_messages = vec![deferred_message.clone(); max_messages];
 		crate::Pallet::<T>::inject_deferred_messages(para_id, (deferred_to, 0), deferred_xcm_messages.try_into().unwrap());
@@ -98,6 +103,9 @@ benchmarks! {
 		assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (deferred_to, 0)).len(), 0);
 	}
 	discard_deferred_individual {
+		let m in 1..T::MaxDeferredMessages::get();
+
+		let max_messages = m as usize;
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
@@ -105,7 +113,6 @@ benchmarks! {
 
 		let sent_at = 1;
 		let deferred_to = 6;
-		let max_messages = T::MaxDeferredMessages::get() as usize;
 		let deferred_message = DeferredMessage { sent_at, deferred_to, sender: para_id, xcm };
 		let deferred_xcm_messages = vec![deferred_message.clone(); max_messages];
 		crate::Pallet::<T>::inject_deferred_messages(para_id, (deferred_to, 0), deferred_xcm_messages.try_into().unwrap());
@@ -118,11 +125,13 @@ benchmarks! {
 		assert_eq!(messages[max_messages - 1], None);
 	}
 	try_place_in_deferred_queue {
+		let m in 1..T::MaxDeferredMessages::get();
+
+		let max_messages = m as usize;
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
 
-		let max_messages = T::MaxDeferredMessages::get() as usize;
 		let relay_block = T::RelayChainBlockNumberProvider::current_block_number();
 		let max_buckets = T::MaxDeferredBuckets::get();
 		let indices: Vec<DeferredIndex> = (0..(max_buckets-1)).map(|i| (relay_block, i as u16)).collect();

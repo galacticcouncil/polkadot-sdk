@@ -336,7 +336,7 @@ pub mod pallet {
 		/// - `weight_limit`: Maximum weight budget for deferred message execution.
 		/// - `para_id`: The queue to service.
 		#[pallet::call_index(9)]
-		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred()), DispatchClass::Operational))]
+		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get())), DispatchClass::Operational))]
 		pub fn service_deferred(
 			origin: OriginFor<T>,
 			weight_limit: Weight,
@@ -353,7 +353,7 @@ pub mod pallet {
 				relay_block_number,
 				xcmp_max_individual_weight,
 			);
-			Ok(Some(weight_used.saturating_add(Weight::from_parts(1_000_000, 0))).into())
+			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()))).into())
 		}
 
 		/// This extrinsic discards all deferred messages that match the given parameters.
@@ -365,7 +365,8 @@ pub mod pallet {
 		///     if `None`.
 		#[pallet::call_index(11)]
 		#[pallet::weight((
-			T::WeightInfo::discard_deferred_individual().max(T::WeightInfo::discard_deferred_bucket()),
+			T::WeightInfo::discard_deferred_individual(T::MaxDeferredMessages::get())
+				.max(T::WeightInfo::discard_deferred_bucket(T::MaxDeferredMessages::get())),
 			DispatchClass::Operational
 		))]
 		pub fn discard_deferred(
@@ -906,7 +907,9 @@ impl<T: Config> Pallet<T> {
 		match format {
 			XcmpMessageFormat::ConcatenatedVersionedXcm => {
 				while !remaining_fragments.is_empty() &&
-					*messages_processed < MAX_MESSAGES_PER_BLOCK
+					*messages_processed < MAX_MESSAGES_PER_BLOCK &&
+					weight_used.saturating_add(T::WeightInfo::try_place_in_deferred_queue(T::MaxDeferredMessages::get()))
+						.all_lte(max_weight)
 				{
 					last_remaining_fragments = remaining_fragments;
 					if let Ok(xcm) = VersionedXcm::<T::RuntimeCall>::decode_with_depth_limit(
@@ -926,7 +929,7 @@ impl<T: Config> Pallet<T> {
 							let deferred_to = relay_block.saturating_add(defer_by);
 
 							let hash = xcm.using_encoded(sp_io::hashing::blake2_256);
-							weight_used.saturating_accrue(T::WeightInfo::try_place_in_deferred_queue());
+							
 							let _ = Self::try_place_in_deferred_queue(
 								sender,
 								deferred_to,
@@ -942,6 +945,7 @@ impl<T: Config> Pallet<T> {
 									message_hash: Some(hash),
 								};
 								Self::deposit_event(e);
+								weight_used.saturating_accrue(T::WeightInfo::try_place_in_deferred_queue(position.saturating_add(1)));
 							})
 							.map_err(|()| {
 								log::warn!("Deferred XCM queue full. Dropping message.");
@@ -950,6 +954,7 @@ impl<T: Config> Pallet<T> {
 									sent_at,
 									message_hash: Some(hash),
 								});
+								weight_used.saturating_accrue(T::WeightInfo::try_place_in_deferred_queue(T::MaxDeferredMessages::get()));
 							});
 						} else {
 							*messages_processed += 1;
@@ -1171,10 +1176,10 @@ impl<T: Config> Pallet<T> {
 				let (sent_at, format) = status[index].message_metadata[0];
 
 				
-				let weight_used_for_queue = if T::WeightInfo::service_deferred().any_gte(weight_remaining) {
+				let weight_used_for_queue = if T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()).any_gte(weight_remaining) {
 					Weight::zero()
 				} else {
-					T::WeightInfo::service_deferred().saturating_add(
+					T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()).saturating_add(
 						Self::service_deferred_queue(sender, weight_remaining, sent_at, xcmp_max_individual_weight))
 				};
 				let weight_remaining = weight_remaining.saturating_sub(weight_used_for_queue);
@@ -1236,7 +1241,7 @@ impl<T: Config> Pallet<T> {
 		}
 		let mut keys = DeferredIndices::<T>::iter_keys();
 		let mut processed_all_queues = false;
-		let service_queue_weight = T::WeightInfo::service_deferred();
+		let service_queue_weight = T::WeightInfo::service_deferred(T::MaxDeferredMessages::get());
 		while !processed_all_queues && max_weight.all_gt(weight_used.saturating_add(service_queue_weight)) {
 			if let Some(sender) = keys.next() {
 				weight_used.saturating_accrue(service_queue_weight);

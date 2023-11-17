@@ -583,7 +583,8 @@ fn service_deferred_queues_should_pass_overweight_messages_to_overweight_queue()
 		// We just set a very low max_inidividual_weight to trigger the overweight logic
 		let low_max_individual_weight = Weight::from_parts(100, 1);
 		let low_max_weight =
-			low_max_individual_weight.saturating_add(<Test as Config>::WeightInfo::service_deferred());
+			low_max_individual_weight.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxDeferredMessages::get()));
 		assert!(FixedWeigher::weight(&mut xcm).unwrap().any_gt(low_max_weight));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
@@ -626,7 +627,8 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 		// We just set a very low max weight to stop processing deferred messages early
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(<Test as Config>::WeightInfo::service_deferred());
+			.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxDeferredMessages::get()));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let second_para_id = ParaId::from(1000);
@@ -684,7 +686,8 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 		// We just set a very low max weight to stop processing deferred messages early
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(<Test as Config>::WeightInfo::service_deferred());
+			.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxDeferredMessages::get()));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let mut xcmp_message = Vec::new();
