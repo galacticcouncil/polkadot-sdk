@@ -46,8 +46,10 @@ benchmarks! {
 	set_config_with_weight {}: update_weight_restrict_decay(RawOrigin::Root, Weight::from_parts(3_000_000, 0))
 	service_deferred {
 		let m in 1..T::MaxDeferredMessages::get();
+		let b in 1..T::MaxBucketsProcessed::get();
 
 		let max_messages = m as usize;
+		let max_processed = b as u16;
 		let para_id = ParaId::from(999);
 
 		let xcm = construct_xcm::<T::RuntimeCall>();
@@ -56,7 +58,6 @@ benchmarks! {
 		// We set `deferred_to` to the current relay block number to make sure that the messages are serviced.
 		let deferred_message = DeferredMessage { sent_at: relay_block, deferred_to: relay_block, sender: para_id, xcm };
 		let deferred_xcm_messages = vec![deferred_message.clone(); max_messages];
-		let max_processed = T::MaxBucketsProcessed::get() as u16;
 		for i in 0..max_processed {
 			crate::Pallet::<T>::inject_deferred_messages(para_id, (relay_block, i), deferred_xcm_messages.clone().try_into().unwrap());
 			assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, i)).len(), max_messages);
@@ -70,7 +71,7 @@ benchmarks! {
 		assert!(crate::Pallet::<T>::update_xcmp_max_individual_weight(RawOrigin::Root.into(), weight).is_ok());
 		// account for the reads induced by trying to execute all `max_messages`
 		let weight_limit = weight.saturating_add(T::DbWeight::get().reads_writes((max_processed as usize * max_messages) as u64, 0));
-	} :_(RawOrigin::Root, weight_limit, para_id)
+	} :_(RawOrigin::Root, weight_limit, para_id, max_processed as u32)
 	verify
 	{
 		assert_eq!(crate::Pallet::<T>::messages_deferred_to(para_id, (relay_block, 0)).len(), 0);

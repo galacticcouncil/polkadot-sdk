@@ -330,31 +330,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// This extrinsic executes deferred messages up to the specified `weight_limit` and the current relay chain block number.
-		///
-		/// - `origin`: Must pass `ExecuteDeferredOrigin`.
-		/// - `weight_limit`: Maximum weight budget for deferred message execution.
-		/// - `para_id`: The queue to service.
-		#[pallet::call_index(9)]
-		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get())), DispatchClass::Operational))]
-		pub fn service_deferred(
-			origin: OriginFor<T>,
-			weight_limit: Weight,
-			para_id: ParaId,
-		) -> DispatchResultWithPostInfo {
-			T::ExecuteDeferredOrigin::ensure_origin(origin)?;
-
-			let relay_block_number = T::RelayChainBlockNumberProvider::current_block_number();
-			let QueueConfigData { xcmp_max_individual_weight, .. } = QueueConfig::<T>::get();
-
-			let weight_used = Self::service_deferred_queue(
-				para_id,
-				weight_limit,
-				relay_block_number,
-				xcmp_max_individual_weight,
-			);
-			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()))).into())
-		}
+		// 9 and 10 are deprecated
 
 		/// This extrinsic discards all deferred messages that match the given parameters.
 		///
@@ -457,6 +433,35 @@ pub mod pallet {
 			DeferAllBy::<T>::mutate_exists(|d| { *d = maybe_defer_by; });
 
 			Ok(())
+		}
+
+		/// This extrinsic executes deferred messages up to the specified `weight_limit` and the current relay chain block number.
+		///
+		/// - `origin`: Must pass `ExecuteDeferredOrigin`.
+		/// - `weight_limit`: Maximum weight budget for deferred message execution.
+		/// - `para_id`: The queue to service.
+		/// - `max_processed`: The maximum number of buckets to process.
+		#[pallet::call_index(15)]
+		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), *max_processed)), DispatchClass::Operational))]
+		pub fn service_deferred(
+			origin: OriginFor<T>,
+			weight_limit: Weight,
+			para_id: ParaId,
+			max_processed: u32,
+		) -> DispatchResultWithPostInfo {
+			T::ExecuteDeferredOrigin::ensure_origin(origin)?;
+
+			let relay_block_number = T::RelayChainBlockNumberProvider::current_block_number();
+			let QueueConfigData { xcmp_max_individual_weight, .. } = QueueConfig::<T>::get();
+
+			let weight_used = Self::service_deferred_queue(
+				para_id,
+				weight_limit,
+				relay_block_number,
+				xcmp_max_individual_weight,
+				max_processed as usize,
+			);
+			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed))).into())
 		}
 	}
 
@@ -1175,12 +1180,18 @@ impl<T: Config> Pallet<T> {
 
 				let (sent_at, format) = status[index].message_metadata[0];
 
-				
-				let weight_used_for_queue = if T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()).any_gte(weight_remaining) {
+				let max_processed = T::MaxBucketsProcessed::get();
+				let weight_used_for_queue = if T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed).any_gte(weight_remaining) {
 					Weight::zero()
 				} else {
-					T::WeightInfo::service_deferred(T::MaxDeferredMessages::get()).saturating_add(
-						Self::service_deferred_queue(sender, weight_remaining, sent_at, xcmp_max_individual_weight))
+					T::WeightInfo::service_deferred(T::MaxDeferredMessages::get(), max_processed).saturating_add(
+						Self::service_deferred_queue(
+							sender,
+							weight_remaining,
+							sent_at,
+							xcmp_max_individual_weight,
+							max_processed as usize,
+						))
 				};
 				let weight_remaining = weight_remaining.saturating_sub(weight_used_for_queue);
 
@@ -1241,7 +1252,8 @@ impl<T: Config> Pallet<T> {
 		}
 		let mut keys = DeferredIndices::<T>::iter_keys();
 		let mut processed_all_queues = false;
-		let service_queue_weight = T::WeightInfo::service_deferred(T::MaxDeferredMessages::get());
+		let service_queue_weight = T::WeightInfo::service_deferred(
+			T::MaxDeferredMessages::get(), T::MaxBucketsProcessed::get());
 		while !processed_all_queues && max_weight.all_gt(weight_used.saturating_add(service_queue_weight)) {
 			if let Some(sender) = keys.next() {
 				weight_used.saturating_accrue(service_queue_weight);
@@ -1250,6 +1262,7 @@ impl<T: Config> Pallet<T> {
 					max_weight.saturating_sub(weight_used),
 					relay_chain_block_number,
 					max_individual_weight,
+					T::MaxBucketsProcessed::get() as usize,
 				));
 			} else {
 				processed_all_queues = true;
@@ -1265,6 +1278,7 @@ impl<T: Config> Pallet<T> {
 		max_weight: Weight,
 		up_to_relay_block_number: RelayBlockNumber,
 		max_individual_weight: Weight,
+		max_processed: usize,
 	) -> Weight {
 		if QueueSuspended::<T>::get() || DeferredQueueSuspended::<T>::get() {
 			return Weight::zero();
@@ -1275,7 +1289,7 @@ impl<T: Config> Pallet<T> {
 		let indices_to_process =
 			indices.range((Included(&(0, 0)), Included(&(up_to_relay_block_number, u16::MAX))));
 		let mut processed = BTreeSet::new();
-		for index in indices_to_process.take(T::MaxBucketsProcessed::get() as usize) {
+		for index in indices_to_process.take(max_processed) {
 			if weight_used.any_gte(max_weight) {
 				break;
 			}

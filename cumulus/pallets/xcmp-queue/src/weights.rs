@@ -26,7 +26,7 @@ use sp_std::marker::PhantomData;
 pub trait WeightInfo {
 	fn set_config_with_u32() -> Weight;
 	fn set_config_with_weight() -> Weight;
-	fn service_deferred(m: u32) -> Weight;
+	fn service_deferred(m: u32, b: u32) -> Weight;
 	fn discard_deferred_bucket(m: u32) -> Weight;
 	fn discard_deferred_individual(m: u32) -> Weight;
 	fn try_place_in_deferred_queue(m: u32) -> Weight;
@@ -65,7 +65,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	// Proof Skipped: XcmpQueue OverweightCount (max_values: Some(1), max_size: None, mode: Measured)
 	// Storage: XcmpQueue Overweight (r:100 w:100)
 	// Proof Skipped: XcmpQueue Overweight (max_values: None, max_size: None, mode: Measured)
-	fn service_deferred(m: u32) -> Weight {
+	fn service_deferred(m: u32, b: u32) -> Weight {
 		Weight::from_parts(221_105_465_000 as u64, 0)
 			.saturating_add(T::DbWeight::get().reads(107 as u64))
 			.saturating_add(T::DbWeight::get().writes(104 as u64))
@@ -126,7 +126,7 @@ impl WeightInfo for () {
 	// Proof Skipped: XcmpQueue OverweightCount (max_values: Some(1), max_size: None, mode: Measured)
 	// Storage: XcmpQueue Overweight (r:100 w:100)
 	// Proof Skipped: XcmpQueue Overweight (max_values: None, max_size: None, mode: Measured)
-	fn service_deferred(m: u32) -> Weight {
+	fn service_deferred(m: u32, b: u32) -> Weight {
 		Weight::from_parts(221_105_465_000 as u64, 0)
 			.saturating_add(RocksDbWeight::get().reads(107 as u64))
 			.saturating_add(RocksDbWeight::get().writes(104 as u64))
