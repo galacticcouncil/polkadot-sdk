@@ -871,6 +871,8 @@ fn discard_deferred_should_remove_messages_when_only_required_params_specified()
 	});
 }
 
+// TODO: test for placing more than MaxMesssages into queue so we use more than one bucket
+
 #[test]
 fn handle_xcmp_messages_should_execute_deferred_message_from_different_blocks() {
 	new_test_ext().execute_with(|| {

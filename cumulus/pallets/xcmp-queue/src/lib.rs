@@ -454,14 +454,14 @@ pub mod pallet {
 			let relay_block_number = T::RelayChainBlockNumberProvider::current_block_number();
 			let QueueConfigData { xcmp_max_individual_weight, .. } = QueueConfig::<T>::get();
 
-			let weight_used = Self::service_deferred_queue(
+			let (weight_used, processed) = Self::service_deferred_queue(
 				para_id,
 				weight_limit,
 				relay_block_number,
 				xcmp_max_individual_weight,
 				max_processed as usize,
 			);
-			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(max_processed))).into())
+			Ok(Some(weight_used.saturating_add(T::WeightInfo::service_deferred(processed))).into())
 		}
 	}
 
@@ -1184,14 +1184,14 @@ impl<T: Config> Pallet<T> {
 				let weight_used_for_queue = if T::WeightInfo::service_deferred(max_processed).any_gte(weight_remaining) {
 					Weight::zero()
 				} else {
-					T::WeightInfo::service_deferred(max_processed).saturating_add(
-						Self::service_deferred_queue(
-							sender,
-							weight_remaining,
-							sent_at,
-							xcmp_max_individual_weight,
-							max_processed as usize,
-						))
+					let (weight, processed) = Self::service_deferred_queue(
+						sender,
+						weight_remaining,
+						sent_at,
+						xcmp_max_individual_weight,
+						max_processed as usize,
+					);
+					T::WeightInfo::service_deferred(processed).saturating_add(weight)
 				};
 				let weight_remaining = weight_remaining.saturating_sub(weight_used_for_queue);
 
@@ -1255,14 +1255,15 @@ impl<T: Config> Pallet<T> {
 		let service_queue_weight = T::WeightInfo::service_deferred(T::MaxBucketsProcessed::get());
 		while !processed_all_queues && max_weight.all_gt(weight_used.saturating_add(service_queue_weight)) {
 			if let Some(sender) = keys.next() {
-				weight_used.saturating_accrue(service_queue_weight);
-				weight_used.saturating_accrue(Self::service_deferred_queue(
+				let (weight, processed) = Self::service_deferred_queue(
 					sender,
-					max_weight.saturating_sub(weight_used),
+					max_weight.saturating_sub(weight_used.saturating_add(service_queue_weight)),
 					relay_chain_block_number,
 					max_individual_weight,
 					T::MaxBucketsProcessed::get() as usize,
-				));
+				);
+				weight_used.saturating_accrue(T::WeightInfo::service_deferred(processed));
+				weight_used.saturating_accrue(weight);
 			} else {
 				processed_all_queues = true;
 			}
@@ -1278,9 +1279,9 @@ impl<T: Config> Pallet<T> {
 		up_to_relay_block_number: RelayBlockNumber,
 		max_individual_weight: Weight,
 		max_processed: usize,
-	) -> Weight {
+	) -> (Weight, u32) {
 		if QueueSuspended::<T>::get() || DeferredQueueSuspended::<T>::get() {
-			return Weight::zero();
+			return (Weight::zero(), 0);
 		}
 		let mut weight_used = Weight::zero();
 
@@ -1288,10 +1289,12 @@ impl<T: Config> Pallet<T> {
 		let indices_to_process =
 			indices.range((Included(&(0, 0)), Included(&(up_to_relay_block_number, u16::MAX))));
 		let mut processed = BTreeSet::new();
+		let mut num_processed = 0;
 		for index in indices_to_process.take(max_processed) {
 			if weight_used.any_gte(max_weight) {
 				break;
 			}
+			num_processed += 1;
 			let remove = DeferredMessageBuckets::<T>::mutate(sender, index, |bucket| {
 				weight_used.saturating_accrue(Self::process_deferred_messages(
 					sender,
@@ -1312,7 +1315,7 @@ impl<T: Config> Pallet<T> {
 			DeferredIndices::<T>::insert(sender, indices);
 		}
 
-		weight_used
+		(weight_used, num_processed)
 	}
 
 	/// Try to place a message in the deferred queue for `sender`.
@@ -1351,7 +1354,7 @@ impl<T: Config> Pallet<T> {
 				indices.try_insert(new_index).map_err(|_| ())?;
 				let _ =
 					DeferredMessageBuckets::<T>::try_append(sender, new_index, &deferred_message)
-						.defensive_proof("appending to empty bucket should not fail");
+						.defensive_proof("appending to empty bucket cannot fail; qed");
 				(new_index, 0)
 			};
 			Ok(index_and_pos)
