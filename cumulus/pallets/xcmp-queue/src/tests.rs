@@ -871,7 +871,62 @@ fn discard_deferred_should_remove_messages_when_only_required_params_specified()
 	});
 }
 
-// TODO: test for placing more than MaxMesssages into queue so we use more than one bucket
+#[test]
+fn service_deferred_queues_should_execute_deferred_messages_from_several_buckets() {
+	new_test_ext().execute_with(|| {
+		//Arrange
+		let versioned_xcm = create_versioned_reserve_asset_deposited();
+
+		let para_id = ParaId::from(999);
+
+		let mut xcmp_message = Vec::new();
+		let encoded_msg = versioned_xcm.encode();
+		let num_msgs: usize = (<Test as Config>::MaxDeferredMessages::get() * 2) as usize;
+		let formatted_msg = format_messages(&mut xcmp_message, vec![encoded_msg.clone(); num_msgs]);
+		let messages = vec![(para_id, 1u32.into(), formatted_msg)];
+
+		RelayBlockNumberProviderMock::set(1);
+		XcmpQueue::handle_xcmp_messages(messages.clone().into_iter(), Weight::MAX);
+
+		assert_eq!(
+			create_bounded_btreeset([(6_u32, 0_u16), (6_u32, 1_u16)].into_iter()),
+			DeferredIndices::<Test>::get(para_id)
+		);
+		assert_eq!(
+			create_bounded_vec(vec![Some(DeferredMessage {
+				sent_at: 1u32.into(),
+				sender: para_id,
+				xcm: versioned_xcm.clone(),
+				deferred_to: 6
+			}); num_msgs / 2]),
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 0_u16)),
+		);
+		assert_eq!(
+			create_bounded_vec(vec![Some(DeferredMessage {
+				sent_at: 1u32.into(),
+				sender: para_id,
+				xcm: versioned_xcm.clone(),
+				deferred_to: 6
+			}); num_msgs / 2]),
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 1_u16)),
+		);
+
+		let QueueConfigData { xcmp_max_individual_weight, .. } = <QueueConfig<Test>>::get();
+
+		//Act
+		XcmpQueue::service_deferred_queues(Weight::MAX, 6, xcmp_max_individual_weight);
+
+		//Assert
+		assert_eq!(
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 0_u16)),
+			create_bounded_vec(vec![])
+		);
+		assert_eq!(
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 1_u16)),
+			create_bounded_vec(vec![])
+		);
+	});
+}
 
 #[test]
 fn handle_xcmp_messages_should_execute_deferred_message_from_different_blocks() {

@@ -297,7 +297,17 @@ pub fn create_versioned_reserve_asset_deposited() -> VersionedXcm<RuntimeCall> {
 
 pub fn format_message(msg: &mut Vec<u8>, encoded_xcm: Vec<u8>) -> &[u8] {
 	msg.extend(XcmpMessageFormat::ConcatenatedVersionedXcm.encode());
-	msg.extend(encoded_xcm.clone());
+	msg.extend(encoded_xcm);
+	msg
+}
+
+pub fn format_messages<I>(msg: &mut Vec<u8>, encoded_xcms: I) -> &[u8] 
+where I:  IntoIterator<Item = Vec<u8>>
+{
+	msg.extend(XcmpMessageFormat::ConcatenatedVersionedXcm.encode());
+	for encoded_xcm in encoded_xcms.into_iter() {
+		msg.extend(encoded_xcm);
+	}
 	msg
 }
 
