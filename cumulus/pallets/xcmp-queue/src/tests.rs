@@ -466,7 +466,7 @@ fn service_deferred_should_execute_deferred_messages() {
 		RelayBlockNumberProviderMock::set(7);
 
 		//Act
-		assert_ok!(XcmpQueue::service_deferred(RuntimeOrigin::root(), Weight::MAX, para_id));
+		assert_ok!(XcmpQueue::service_deferred(RuntimeOrigin::root(), Weight::MAX, para_id, <Test as Config>::MaxBucketsProcessed::get()));
 
 		//Assert
 		assert_eq!(create_bounded_btreeset([].into_iter()), DeferredIndices::<Test>::get(para_id));
@@ -531,7 +531,7 @@ fn service_deferred_should_store_unprocessed_messages() {
 		RelayBlockNumberProviderMock::set(7);
 
 		//Act
-		assert_ok!(XcmpQueue::service_deferred(RuntimeOrigin::root(), Weight::MAX, para_id));
+		assert_ok!(XcmpQueue::service_deferred(RuntimeOrigin::root(), Weight::MAX, para_id, <Test as Config>::MaxBucketsProcessed::get()));
 
 		//Assert
 		assert_deferred_messages!(para_id, (8, 0), vec![Some(msg_not_to_process)]);
@@ -566,7 +566,7 @@ fn service_deferred_should_fail_when_called_with_wrong_origin() {
 
 		//Act and assert
 		assert_noop!(
-			XcmpQueue::service_deferred(RuntimeOrigin::signed(100), Weight::MAX, para_id),
+			XcmpQueue::service_deferred(RuntimeOrigin::signed(100), Weight::MAX, para_id, <Test as Config>::MaxBucketsProcessed::get()),
 			BadOrigin
 		);
 	});
@@ -581,10 +581,10 @@ fn service_deferred_queues_should_pass_overweight_messages_to_overweight_queue()
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max_inidividual_weight to trigger the overweight logic
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_individual_weight = Weight::from_parts(100, 1);
 		let low_max_weight =
-			low_max_individual_weight.saturating_add(db_weights.reads_writes(2, 2));
+			low_max_individual_weight.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxBucketsProcessed::get()));
 		assert!(FixedWeigher::weight(&mut xcm).unwrap().any_gt(low_max_weight));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
@@ -625,10 +625,10 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max weight to stop processing deferred messages early
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(db_weights.reads_writes(2, 2));
+			.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxBucketsProcessed::get()));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let second_para_id = ParaId::from(1000);
@@ -684,10 +684,10 @@ fn service_deferred_queues_should_stop_processing_when_weight_limit_is_reached_f
 			MultiAssets::new(),
 		)]);
 		// We just set a very low max weight to stop processing deferred messages early
-		let db_weights: RuntimeDbWeight = <Test as frame_system::Config>::DbWeight::get();
 		let low_max_weight = FixedWeigher::weight(&mut xcm)
 			.unwrap()
-			.saturating_add(db_weights.reads_writes(2, 2));
+			.saturating_add(
+				<Test as Config>::WeightInfo::service_deferred(<Test as Config>::MaxBucketsProcessed::get()));
 		let versioned_xcm = VersionedXcm::from(xcm);
 		let para_id = ParaId::from(999);
 		let mut xcmp_message = Vec::new();
@@ -867,6 +867,63 @@ fn discard_deferred_should_remove_messages_when_only_required_params_specified()
 		assert_eq!(
 			DeferredMessageBuckets::<Test>::get(para_id, (7, 0)),
 			create_bounded_vec(vec![Some(third_message)])
+		);
+	});
+}
+
+#[test]
+fn service_deferred_queues_should_execute_deferred_messages_from_several_buckets() {
+	new_test_ext().execute_with(|| {
+		//Arrange
+		let versioned_xcm = create_versioned_reserve_asset_deposited();
+
+		let para_id = ParaId::from(999);
+
+		let mut xcmp_message = Vec::new();
+		let encoded_msg = versioned_xcm.encode();
+		let num_msgs: usize = (<Test as Config>::MaxDeferredMessages::get() * 2) as usize;
+		let formatted_msg = format_messages(&mut xcmp_message, vec![encoded_msg.clone(); num_msgs]);
+		let messages = vec![(para_id, 1u32.into(), formatted_msg)];
+
+		RelayBlockNumberProviderMock::set(1);
+		XcmpQueue::handle_xcmp_messages(messages.clone().into_iter(), Weight::MAX);
+
+		assert_eq!(
+			create_bounded_btreeset([(6_u32, 0_u16), (6_u32, 1_u16)].into_iter()),
+			DeferredIndices::<Test>::get(para_id)
+		);
+		assert_eq!(
+			create_bounded_vec(vec![Some(DeferredMessage {
+				sent_at: 1u32.into(),
+				sender: para_id,
+				xcm: versioned_xcm.clone(),
+				deferred_to: 6
+			}); num_msgs / 2]),
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 0_u16)),
+		);
+		assert_eq!(
+			create_bounded_vec(vec![Some(DeferredMessage {
+				sent_at: 1u32.into(),
+				sender: para_id,
+				xcm: versioned_xcm.clone(),
+				deferred_to: 6
+			}); num_msgs / 2]),
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 1_u16)),
+		);
+
+		let QueueConfigData { xcmp_max_individual_weight, .. } = <QueueConfig<Test>>::get();
+
+		//Act
+		XcmpQueue::service_deferred_queues(Weight::MAX, 6, xcmp_max_individual_weight);
+
+		//Assert
+		assert_eq!(
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 0_u16)),
+			create_bounded_vec(vec![])
+		);
+		assert_eq!(
+			DeferredMessageBuckets::<Test>::get(para_id, (6_u32, 1_u16)),
+			create_bounded_vec(vec![])
 		);
 	});
 }

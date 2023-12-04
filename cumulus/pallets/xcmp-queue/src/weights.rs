@@ -26,10 +26,10 @@ use sp_std::marker::PhantomData;
 pub trait WeightInfo {
 	fn set_config_with_u32() -> Weight;
 	fn set_config_with_weight() -> Weight;
-	fn service_deferred() -> Weight;
-	fn discard_deferred_bucket() -> Weight;
-	fn discard_deferred_individual() -> Weight;
-	fn try_place_in_deferred_queue() -> Weight;
+	fn service_deferred(b: u32) -> Weight;
+	fn discard_deferred_bucket(m: u32) -> Weight;
+	fn discard_deferred_individual(m: u32) -> Weight;
+	fn try_place_in_deferred_queue(m: u32) -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -65,21 +65,21 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	// Proof Skipped: XcmpQueue OverweightCount (max_values: Some(1), max_size: None, mode: Measured)
 	// Storage: XcmpQueue Overweight (r:100 w:100)
 	// Proof Skipped: XcmpQueue Overweight (max_values: None, max_size: None, mode: Measured)
-	fn service_deferred() -> Weight {
+	fn service_deferred(b: u32) -> Weight {
 		Weight::from_parts(221_105_465_000 as u64, 0)
 			.saturating_add(T::DbWeight::get().reads(107 as u64))
 			.saturating_add(T::DbWeight::get().writes(104 as u64))
 	}
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn discard_deferred_bucket() -> Weight {
+	fn discard_deferred_bucket(m: u32) -> Weight {
 		Weight::from_parts(149_864_999_000 as u64, 0)
 			.saturating_add(T::DbWeight::get().reads(1 as u64))
 			.saturating_add(T::DbWeight::get().writes(1 as u64))
 	}
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn discard_deferred_individual() -> Weight {
+	fn discard_deferred_individual(m: u32) -> Weight {
 		Weight::from_parts(161_216_156_000 as u64, 0)
 			.saturating_add(T::DbWeight::get().reads(1 as u64))
 			.saturating_add(T::DbWeight::get().writes(1 as u64))
@@ -88,7 +88,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	// Proof Skipped: XcmpQueue DeferredIndices (max_values: None, max_size: None, mode: Measured)
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn try_place_in_deferred_queue() -> Weight {
+	fn try_place_in_deferred_queue(m: u32) -> Weight {
 		Weight::from_parts(510_298_000 as u64, 0)
 			.saturating_add(T::DbWeight::get().reads(2 as u64))
 			.saturating_add(T::DbWeight::get().writes(2 as u64))
@@ -126,21 +126,21 @@ impl WeightInfo for () {
 	// Proof Skipped: XcmpQueue OverweightCount (max_values: Some(1), max_size: None, mode: Measured)
 	// Storage: XcmpQueue Overweight (r:100 w:100)
 	// Proof Skipped: XcmpQueue Overweight (max_values: None, max_size: None, mode: Measured)
-	fn service_deferred() -> Weight {
+	fn service_deferred(b: u32) -> Weight {
 		Weight::from_parts(221_105_465_000 as u64, 0)
 			.saturating_add(RocksDbWeight::get().reads(107 as u64))
 			.saturating_add(RocksDbWeight::get().writes(104 as u64))
 	}
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn discard_deferred_bucket() -> Weight {
+	fn discard_deferred_bucket(m: u32) -> Weight {
 		Weight::from_parts(149_864_999_000 as u64, 0)
 				.saturating_add(RocksDbWeight::get().reads(1 as u64))
 				.saturating_add(RocksDbWeight::get().writes(1 as u64))
 		}
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn discard_deferred_individual() -> Weight {
+	fn discard_deferred_individual(m: u32) -> Weight {
 		Weight::from_parts(161_216_156_000 as u64, 0)
 			.saturating_add(RocksDbWeight::get().reads(1 as u64))
 			.saturating_add(RocksDbWeight::get().writes(1 as u64))
@@ -149,7 +149,7 @@ impl WeightInfo for () {
 	// Proof Skipped: XcmpQueue DeferredIndices (max_values: None, max_size: None, mode: Measured)
 	// Storage: XcmpQueue DeferredMessageBuckets (r:1 w:1)
 	// Proof Skipped: XcmpQueue DeferredMessageBuckets (max_values: None, max_size: None, mode: Measured)
-	fn try_place_in_deferred_queue() -> Weight {
+	fn try_place_in_deferred_queue(m: u32) -> Weight {
 		Weight::from_parts(510_298_000 as u64, 0)
 			.saturating_add(RocksDbWeight::get().reads(2 as u64))
 			.saturating_add(RocksDbWeight::get().writes(2 as u64))
