@@ -617,15 +617,40 @@ impl<Config: config::Config> XcmExecutor<Config> {
 			},
 			DepositAsset { assets, beneficiary } => {
 				let deposited = self.holding.saturating_take(assets);
+				let mut maybe_error = None;
 				for asset in deposited.into_assets_iter() {
-					Config::AssetTransactor::deposit_asset(&asset, &beneficiary, &self.context)?;
+					if maybe_error.is_none() {
+						let _ = Config::AssetTransactor::deposit_asset(&asset, &beneficiary, &self.context).map_err(|e| {
+							maybe_error = Some(e);
+						});
+					}
+					// We assume a failed `deposit_asset` does not consume the asset and thus return it to holding.
+					if maybe_error.is_some() {
+						self.holding.subsume_assets(asset.into());
+					}
 				}
-				Ok(())
+				if let Some(err) = maybe_error {
+					Err(err)
+				} else {
+					Ok(())
+				}
 			},
 			DepositReserveAsset { assets, dest, xcm } => {
 				let deposited = self.holding.saturating_take(assets);
+				let mut maybe_error = None;
 				for asset in deposited.assets_iter() {
-					Config::AssetTransactor::deposit_asset(&asset, &dest, &self.context)?;
+					if maybe_error.is_none() {
+						let _ = Config::AssetTransactor::deposit_asset(&asset, &dest, &self.context).map_err(|e| {
+							maybe_error = Some(e);
+						});
+					}
+					// We assume a failed `deposit_asset` does not consume the asset and thus return it to holding.
+					if maybe_error.is_some() {
+						self.holding.subsume_assets(asset.into());
+					}
+				}
+				if let Some(err) = maybe_error {
+					return Err(err)
 				}
 				// Note that we pass `None` as `maybe_failed_bin` and drop any assets which cannot
 				// be reanchored  because we have already called `deposit_asset` on all assets.
@@ -691,8 +716,15 @@ impl<Config: config::Config> XcmExecutor<Config> {
 					// pay for `weight` using up to `fees` of the holding register.
 					let max_fee =
 						self.holding.try_take(fees.into()).map_err(|_| XcmError::NotHoldingFees)?;
-					let unspent = self.trader.buy_weight(weight, max_fee, &self.context)?;
-					self.subsume_assets(unspent)?;
+					match self.trader.buy_weight(weight, max_fee.clone(), &self.context) {
+						Ok(unspent) => self.subsume_assets(unspent)?,
+						Err(err) => {
+							// We assume a failed `buy_weight` does not consume the assets and thus
+							// return them to holding.
+							self.subsume_assets(max_fee)?;
+							return Err(err)
+						},
+					};
 				}
 				Ok(())
 			},
