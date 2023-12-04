@@ -439,7 +439,7 @@ pub mod pallet {
 		///
 		/// - `origin`: Must pass `ExecuteDeferredOrigin`.
 		/// - `weight_limit`: Maximum weight budget for deferred message execution.
-		/// - `para_id`: The queue to service.
+		/// - `para_id`: The parachain id where the deferred messages were sent from.
 		/// - `max_processed`: The maximum number of buckets to process.
 		#[pallet::call_index(15)]
 		#[pallet::weight((weight_limit.saturating_add(T::WeightInfo::service_deferred(*max_processed)), DispatchClass::Operational))]
