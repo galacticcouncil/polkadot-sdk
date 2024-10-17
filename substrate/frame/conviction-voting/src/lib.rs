@@ -43,6 +43,7 @@ use sp_runtime::{
 use sp_std::prelude::*;
 
 mod conviction;
+pub mod traits;
 mod types;
 mod vote;
 pub mod weights;
@@ -50,6 +51,7 @@ pub mod weights;
 pub use self::{
 	conviction::Conviction,
 	pallet::*,
+	traits::VotingHooks,
 	types::{Delegations, Tally, UnvoteScope},
 	vote::{AccountVote, Casting, Delegating, Vote, Voting},
 	weights::WeightInfo,
@@ -136,6 +138,9 @@ pub mod pallet {
 		/// those successful voters are locked into the consequences that their votes entail.
 		#[pallet::constant]
 		type VoteLockingPeriod: Get<BlockNumberFor<Self>>;
+
+		/// Hooks are called when a new vote is registered or an existing vote is removed.
+		type VotingHooks: VotingHooks<Self::AccountId, PollIndexOf<Self, I>, BalanceOf<Self, I>>;
 	}
 
 	/// All voting for a particular voter in a particular voting class. We store the balance for the
@@ -170,6 +175,10 @@ pub mod pallet {
 		Delegated(T::AccountId, T::AccountId),
 		/// An \[account\] has cancelled a previous delegation operation.
 		Undelegated(T::AccountId),
+		/// An account that has voted
+		Voted { who: T::AccountId, vote: AccountVote<BalanceOf<T, I>> },
+		/// A vote that been removed
+		VoteRemoved { who: T::AccountId, vote: AccountVote<BalanceOf<T, I>> },
 	}
 
 	#[pallet::error]
@@ -427,6 +436,10 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 				// Extend the lock to `balance` (rather than setting it) since we don't know what
 				// other votes are in place.
 				Self::extend_lock(who, &class, vote.balance());
+				Self::deposit_event(Event::Voted { who: who.clone(), vote });
+
+				// Call on_vote hook
+				T::VotingHooks::on_vote(who, poll_index, vote)?;
 				Ok(())
 			})
 		})
@@ -462,6 +475,8 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 						if let Some(approve) = v.1.as_standard() {
 							tally.reduce(approve, *delegations);
 						}
+						Self::deposit_event(Event::VoteRemoved { who: who.clone(), vote: v.1 });
+						T::VotingHooks::on_remove_vote(who, poll_index, Some(true));
 						Ok(())
 					},
 					PollStatus::Completed(end, approved) => {
@@ -477,10 +492,36 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 								);
 								prior.accumulate(unlock_at, balance)
 							}
+						} else if v.1.as_standard() == Some(!approved) {
+							// Unsuccessful vote, use special hook to lock the funds too in case of conviction.
+							if let Some(to_lock) =
+								T::VotingHooks::balance_locked_on_unsuccessful_vote(who, poll_index)
+							{
+								if let AccountVote::Standard { vote, .. } = v.1 {
+									let unlock_at = end.saturating_add(
+										T::VoteLockingPeriod::get()
+											.saturating_mul(vote.conviction.lock_periods().into()),
+									);
+									let now = frame_system::Pallet::<T>::block_number();
+									if now < unlock_at {
+										ensure!(
+											matches!(scope, UnvoteScope::Any),
+											Error::<T, I>::NoPermissionYet
+										);
+										prior.accumulate(unlock_at, to_lock)
+									}
+								}
+							}
 						}
+						// Call on_remove_vote hook
+						T::VotingHooks::on_remove_vote(who, poll_index, Some(false));
 						Ok(())
 					},
-					PollStatus::None => Ok(()), // Poll was cancelled.
+					PollStatus::None => {
+						// Poll was cancelled.
+						T::VotingHooks::on_remove_vote(who, poll_index, None);
+						Ok(())
+					},
 				})
 			} else {
 				Ok(())
