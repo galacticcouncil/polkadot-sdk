@@ -1,6 +1,6 @@
 [package]
 name = "bridge-hub-rococo-runtime"
-version = "0.16.0"
+version = "0.16.2"
 authors.workspace = true
 edition.workspace = true
 description = "Rococo's BridgeHub parachain runtime"
@@ -91,6 +91,7 @@ bp-relayers.workspace = true
 bp-runtime.workspace = true
 bp-rococo.workspace = true
 bp-westend.workspace = true
+bp-xcm-bridge-hub-router.workspace = true
 pallet-bridge-grandpa.workspace = true
 pallet-bridge-messages.workspace = true
 pallet-bridge-parachains.workspace = true
@@ -110,11 +111,12 @@ snowbridge-runtime-common.workspace = true
 bridge-hub-common.workspace = true
 
 [dev-dependencies]
+sp-keyring = { path = "../../../../../substrate/primitives/keyring", default-features = false }
 bridge-hub-test-utils = { default-features = true, path = "../test-utils" }
 bridge-runtime-common = { features = ["integrity-test"], default-features = true, path = "../../../../../bridges/bin/runtime-common" }
 pallet-bridge-relayers = { features = ["integrity-test"], path = "../../../../../bridges/modules/relayers", default-features = false }
-sp-keyring = { default-features = true, path = "../../../../../substrate/primitives/keyring" }
 snowbridge-runtime-test-common = { default-features = true, path = "../../../../../bridges/snowbridge/runtime/test-common" }
+parachains-runtimes-test-utils = { default-features = true, path = "../../test-utils" }
 
 [features]
 default = ["std"]
@@ -133,6 +135,7 @@ std = [
 	"bp-rococo/std",
 	"bp-runtime/std",
 	"bp-westend/std",
+	"bp-xcm-bridge-hub-router/std",
 	"bridge-hub-common/std",
 	"bridge-runtime-common/std",
 	"codec/std",
