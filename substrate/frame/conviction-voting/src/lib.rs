@@ -54,7 +54,7 @@ pub use self::{
 	pallet::*,
 	traits::VotingHooks,
 	types::{Delegations, Tally, UnvoteScope},
-	vote::{AccountVote, Casting, Delegating, Vote, Voting},
+	vote::{AccountVote, Casting, Delegating, PriorLock, Vote, Voting},
 	weights::WeightInfo,
 };
 
@@ -69,7 +69,7 @@ const CONVICTION_VOTING_ID: LockIdentifier = *b"pyconvot";
 type AccountIdLookupOf<T> = <<T as frame_system::Config>::Lookup as StaticLookup>::Source;
 type BalanceOf<T, I = ()> =
 	<<T as Config<I>>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
-type VotingOf<T, I = ()> = Voting<
+pub type VotingOf<T, I = ()> = Voting<
 	BalanceOf<T, I>,
 	<T as frame_system::Config>::AccountId,
 	BlockNumberFor<T>,
@@ -84,7 +84,7 @@ pub type VotesOf<T, I = ()> = BalanceOf<T, I>;
 type PollIndexOf<T, I = ()> = <<T as Config<I>>::Polls as Polling<TallyOf<T, I>>>::Index;
 #[cfg(feature = "runtime-benchmarks")]
 type IndexOf<T, I = ()> = <<T as Config<I>>::Polls as Polling<TallyOf<T, I>>>::Index;
-type ClassOf<T, I = ()> = <<T as Config<I>>::Polls as Polling<TallyOf<T, I>>>::Class;
+pub type ClassOf<T, I = ()> = <<T as Config<I>>::Polls as Polling<TallyOf<T, I>>>::Class;
 
 #[frame_support::pallet]
 pub mod pallet {
