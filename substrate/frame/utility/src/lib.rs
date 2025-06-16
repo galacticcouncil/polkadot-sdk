@@ -478,14 +478,10 @@ pub mod pallet {
 			} else {
 				Self::deposit_event(Event::BatchCompleted);
 			}
-<<<<<<< HEAD
-			let base_weight = T::WeightInfo::force_batch(calls_len as u32);
-=======
 
 			T::BatchHook::on_batch_end()?;
+			let base_weight = T::WeightInfo::force_batch(calls_len as u32);
 
-			let base_weight = T::WeightInfo::batch(calls_len as u32);
->>>>>>> 915485c5c8 (add batch hook associated type so we can support custom logic such as unified events ie. in hydration parachain)
 			Ok(Some(base_weight.saturating_add(weight)).into())
 		}
 

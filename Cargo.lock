@@ -16147,6 +16147,8 @@ dependencies = [
  "sp-api 41.0.0",
  "sp-block-builder",
  "sp-consensus 0.47.0",
+ "sp-blockchain",
+ "sp-consensus",
  "sp-consensus-aura",
  "sp-core 40.0.0",
  "sp-genesis-builder 0.22.0",

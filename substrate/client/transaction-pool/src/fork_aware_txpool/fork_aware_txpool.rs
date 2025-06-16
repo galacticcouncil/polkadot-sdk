@@ -2076,6 +2076,7 @@ where
 		+ sc_client_api::ExecutorProvider<Block>
 		+ sc_client_api::UsageProvider<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ Send
 		+ Sync
 		+ 'static,
