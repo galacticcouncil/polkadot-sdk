@@ -827,7 +827,8 @@ where
 		+ sc_client_api::BlockBackend<Block>
 		+ sc_client_api::blockchain::HeaderBackend<Block>
 		+ sp_runtime::traits::BlockIdTo<Block>
-		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>,
+		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>,
 	Client: Send + Sync + 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
 {
@@ -1383,6 +1384,7 @@ where
 		+ sc_client_api::ExecutorProvider<Block>
 		+ sc_client_api::UsageProvider<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ Send
 		+ Sync
 		+ 'static,
