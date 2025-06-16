@@ -445,6 +445,7 @@ pub struct BuildNetworkParams<
 		+ HeaderMetadata<Block, Error = sp_blockchain::Error>
 		+ HeaderBackend<Block>
 		+ BlockIdTo<Block>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Network: NetworkBackend<Block, <Block as BlockT>::Hash>,
 	RCInterface,
@@ -498,6 +499,7 @@ where
 		+ HeaderMetadata<Block, Error = sp_blockchain::Error>
 		+ BlockIdTo<Block, Error = sp_blockchain::Error>
 		+ ProofProvider<Block>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Client::Api: CollectCollationInfo<Block>
 		+ sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
