@@ -39,6 +39,7 @@ use sp_runtime::{
 	transaction_validity::{TransactionSource, TransactionValidity},
 };
 use sp_transaction_pool::runtime_api::TaggedTransactionQueue;
+use sp_blockchain::TransactionPriorityModuleT;
 
 use crate::{
 	error::{self, Error},
@@ -117,7 +118,8 @@ where
 		+ BlockBackend<Block>
 		+ BlockIdTo<Block>
 		+ HeaderBackend<Block>
-		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ TransactionPriorityModuleT<Block = Block>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {
@@ -218,7 +220,8 @@ where
 		+ BlockBackend<Block>
 		+ BlockIdTo<Block>
 		+ HeaderBackend<Block>
-		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ TransactionPriorityModuleT<Block = Block>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {
@@ -236,12 +239,31 @@ where
 
 		use sp_api::Core;
 
+		// Get the priority from the `TransactionPriorityModule`.
+		// If the transaction is not listed in the module, use the priority obtained from the runtime.
+		let priority_modifier = client.get_priority(uxt.clone());
+
 		sp_tracing::within_span!(
 			sp_tracing::Level::TRACE, "runtime::validate_transaction";
 		{
 			if api_version >= 3 {
-				runtime_api.validate_transaction(at, source, uxt, at)
-					.map_err(|e| Error::RuntimeApi(e.to_string()))
+				let runtime_priority = runtime_api.validate_transaction(at, source, uxt.clone(), at)
+					.map_err(|e| Error::RuntimeApi(e.to_string()))?;
+
+				if let Ok(mut validity) = runtime_priority.clone() {
+					if let Some(new_priority) = priority_modifier {
+						// override the runtime priority by the priority from the `TransactionPriorityModule`
+						validity.priority = new_priority;
+
+						log::debug!(target: "tx_priority_module", "Transaction priority of {:?} has been overwritten to {:?}.", uxt, new_priority);
+
+						return Ok(Ok(validity))
+					}
+				}
+
+
+				Ok(runtime_priority)
+
 			} else {
 				let block_number = client.to_number(&BlockId::Hash(at))
 					.map_err(|e| Error::RuntimeApi(e.to_string()))?
@@ -260,12 +282,30 @@ where
 
 				if api_version == 2 {
 					#[allow(deprecated)] // old validate_transaction
-					runtime_api.validate_transaction_before_version_3(at, source, uxt)
-						.map_err(|e| Error::RuntimeApi(e.to_string()))
+					let runtime_priority = runtime_api.validate_transaction_before_version_3(at, source, uxt)
+						.map_err(|e| Error::RuntimeApi(e.to_string()))?;
+					if let Ok(mut validity) = runtime_priority.clone() {
+						if let Some(new_priority) = priority_modifier {
+							// override the runtime priority by the priority from the `TransactionPriorityModule`
+							validity.priority = new_priority;
+							return Ok(Ok(validity))
+						}
+					}
+
+					Ok(runtime_priority)
 				} else {
 					#[allow(deprecated)] // old validate_transaction
-					runtime_api.validate_transaction_before_version_2(at, uxt)
-						.map_err(|e| Error::RuntimeApi(e.to_string()))
+					let runtime_priority = runtime_api.validate_transaction_before_version_2(at, uxt)
+						.map_err(|e| Error::RuntimeApi(e.to_string()))?;
+					if let Ok(mut validity) = runtime_priority.clone() {
+						if let Some(new_priority) = priority_modifier {
+							// override the runtime priority by the priority from the `TransactionPriorityModule`
+							validity.priority = new_priority;
+							return Ok(Ok(validity))
+						}
+					}
+
+					Ok(runtime_priority)
 				}
 			}
 		})
@@ -279,7 +319,8 @@ where
 		+ BlockBackend<Block>
 		+ BlockIdTo<Block>
 		+ HeaderBackend<Block>
-		+ HeaderMetadata<Block, Error = sp_blockchain::Error>,
+		+ HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ TransactionPriorityModuleT<Block = Block>,
 	Client: Send + Sync + 'static,
 	Client::Api: TaggedTransactionQueue<Block>,
 {
