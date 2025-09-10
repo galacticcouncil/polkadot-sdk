@@ -46,6 +46,7 @@ where
 		+ sc_client_api::blockchain::HeaderBackend<Block>
 		+ sp_runtime::traits::BlockIdTo<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>;
 
@@ -57,6 +58,7 @@ where
 		+ sc_client_api::blockchain::HeaderBackend<Block>
 		+ sp_runtime::traits::BlockIdTo<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
 {
@@ -165,6 +167,7 @@ where
 		+ sc_client_api::blockchain::HeaderBackend<Block>
 		+ sp_runtime::traits::BlockIdTo<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
 {
@@ -181,6 +184,7 @@ where
 		+ sc_client_api::blockchain::HeaderBackend<Block>
 		+ sp_runtime::traits::BlockIdTo<Block>
 		+ sp_blockchain::HeaderMetadata<Block, Error = sp_blockchain::Error>
+		+ sp_blockchain::TransactionPriorityModifierT<Block = Block>
 		+ 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
 {

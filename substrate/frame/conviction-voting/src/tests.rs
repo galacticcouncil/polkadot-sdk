@@ -17,10 +17,12 @@
 
 //! The crate's tests.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use frame_system::EnsureSignedBy;
 
 use frame_support::{
-	assert_noop, assert_ok, derive_impl, parameter_types,
+	assert_noop, assert_ok, derive_impl, ord_parameter_types, parameter_types,
 	traits::{ConstU32, ConstU64, Contains, Polling, VoteTally},
 };
 use sp_runtime::BuildStorage;
@@ -146,6 +148,10 @@ impl Polling<TallyOf<Test>> for TestPolls {
 	}
 }
 
+ord_parameter_types! {
+	pub const TwentyTwo: u64 = 22;
+}
+
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = pallet_balances::Pallet<Self>;
@@ -154,6 +160,9 @@ impl Config for Test {
 	type WeightInfo = ();
 	type MaxTurnout = frame_support::traits::TotalIssuanceOf<Balances, Self::AccountId>;
 	type Polls = TestPolls;
+	type VotingHooks = HooksHandler;
+	// Any single technical committee member may remove a vote.
+	type VoteRemovalOrigin = EnsureSignedBy<TwentyTwo, u64>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -844,5 +853,170 @@ fn errors_with_remove_vote_work() {
 			Voting::remove_vote(RuntimeOrigin::signed(1), None, 3),
 			Error::<Test>::ClassNeeded
 		);
+	});
+}
+
+#[test]
+fn force_remove_vote_works() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Voting::force_remove_vote(RuntimeOrigin::signed(22), 1, 0, 3),
+			Error::<Test>::NotVoter
+		);
+		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), 3, aye(10, 2)));
+
+		// Referendum is ongoing: cannot force_remove_vote
+		assert_noop!(
+			Voting::remove_other_vote(RuntimeOrigin::signed(22), 1, 0, 3),
+			Error::<Test>::NoPermission
+		);
+
+		// Referendum is finished
+		Polls::set(vec![(3, Completed(1, true))].into_iter().collect());
+		run_to(6);
+
+		// Funds are still locked - can be triggered only by force_remove_vote
+		assert_noop!(
+			Voting::remove_other_vote(RuntimeOrigin::signed(2), 1, 0, 3),
+			Error::<Test>::NoPermissionYet
+		);
+		assert_ok!(Voting::force_remove_vote(RuntimeOrigin::signed(22), 1, 0, 3));
+	});
+}
+
+thread_local! {
+	static LAST_ON_VOTE_DATA: RefCell<Option<(u64, u8, AccountVote<u64>)>> = RefCell::new(None);
+	static LAST_ON_REMOVE_VOTE_DATA: RefCell<Option<(u64, u8, Option<bool>)>> = RefCell::new(None);
+	static LAST_LOCKED_IF_UNSUCCESSFUL_VOTE_DATA: RefCell<Option<(u64, u8)>> = RefCell::new(None);
+	static REMOVE_VOTE_LOCKED_AMOUNT: RefCell<Option<u64>> = RefCell::new(None);
+}
+
+pub struct HooksHandler;
+
+impl HooksHandler {
+	fn last_on_vote_data() -> Option<(u64, u8, AccountVote<u64>)> {
+		LAST_ON_VOTE_DATA.with(|data| data.borrow().clone())
+	}
+
+	fn last_on_remove_vote_data() -> Option<(u64, u8, Option<bool>)> {
+		LAST_ON_REMOVE_VOTE_DATA.with(|data| data.borrow().clone())
+	}
+
+	fn last_locked_if_unsuccessful_vote_data() -> Option<(u64, u8)> {
+		LAST_LOCKED_IF_UNSUCCESSFUL_VOTE_DATA.with(|data| data.borrow().clone())
+	}
+
+	fn reset() {
+		LAST_ON_VOTE_DATA.with(|data| *data.borrow_mut() = None);
+		LAST_ON_REMOVE_VOTE_DATA.with(|data| *data.borrow_mut() = None);
+		LAST_LOCKED_IF_UNSUCCESSFUL_VOTE_DATA.with(|data| *data.borrow_mut() = None);
+		REMOVE_VOTE_LOCKED_AMOUNT.with(|data| *data.borrow_mut() = None);
+	}
+
+	fn with_remove_locked_amount(v: u64) {
+		REMOVE_VOTE_LOCKED_AMOUNT.with(|data| *data.borrow_mut() = Some(v));
+	}
+}
+
+impl VotingHooks<u64, u8, u64> for HooksHandler {
+	fn on_vote(who: &u64, ref_index: u8, vote: AccountVote<u64>) -> DispatchResult {
+		LAST_ON_VOTE_DATA.with(|data| {
+			*data.borrow_mut() = Some((*who, ref_index, vote));
+		});
+		Ok(())
+	}
+
+	fn on_remove_vote(who: &u64, ref_index: u8, ongoing: Option<bool>) {
+		LAST_ON_REMOVE_VOTE_DATA.with(|data| {
+			*data.borrow_mut() = Some((*who, ref_index, ongoing));
+		});
+	}
+
+	fn balance_locked_on_unsuccessful_vote(who: &u64, ref_index: u8) -> Option<u64> {
+		LAST_LOCKED_IF_UNSUCCESSFUL_VOTE_DATA.with(|data| {
+			*data.borrow_mut() = Some((*who, ref_index));
+
+			REMOVE_VOTE_LOCKED_AMOUNT.with(|data| data.borrow().clone())
+		})
+	}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn on_vote_worst_case(_who: &u64) {}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn on_remove_vote_worst_case(_who: &u64) {}
+}
+
+#[test]
+fn voting_hooks_are_called_correctly() {
+	new_test_ext().execute_with(|| {
+		let c = class(3);
+
+		let usable_balance_1 = Balances::usable_balance(1);
+		dbg!(usable_balance_1);
+
+		// Voting
+		assert_ok!(Voting::vote(RuntimeOrigin::signed(1), 3, aye(1, 1)));
+		assert_eq!(
+			HooksHandler::last_on_vote_data(),
+			Some((
+				1,
+				3,
+				AccountVote::Standard {
+					vote: Vote { aye: true, conviction: Conviction::Locked1x },
+					balance: 1
+				}
+			))
+		);
+		assert_ok!(Voting::vote(RuntimeOrigin::signed(2), 3, nay(20, 2)));
+		assert_eq!(
+			HooksHandler::last_on_vote_data(),
+			Some((
+				2,
+				3,
+				AccountVote::Standard {
+					vote: Vote { aye: false, conviction: Conviction::Locked2x },
+					balance: 20
+				}
+			))
+		);
+		HooksHandler::reset();
+
+		// removing vote while ongoing
+		assert_ok!(Voting::vote(RuntimeOrigin::signed(3), 3, nay(20, 0)));
+		assert_eq!(
+			HooksHandler::last_on_vote_data(),
+			Some((
+				3,
+				3,
+				AccountVote::Standard {
+					vote: Vote { aye: false, conviction: Conviction::None },
+					balance: 20
+				}
+			))
+		);
+		assert_ok!(Voting::remove_vote(RuntimeOrigin::signed(3), Some(c), 3));
+		assert_eq!(HooksHandler::last_on_remove_vote_data(), Some((3, 3, Some(true))));
+		HooksHandler::reset();
+
+		Polls::set(vec![(3, Completed(3, false))].into_iter().collect());
+
+		// removing successful vote while completed
+		assert_ok!(Voting::remove_vote(RuntimeOrigin::signed(2), Some(c), 3));
+		assert_eq!(HooksHandler::last_on_remove_vote_data(), Some((2, 3, Some(false))));
+		assert_eq!(HooksHandler::last_locked_if_unsuccessful_vote_data(), None);
+
+		HooksHandler::reset();
+
+		HooksHandler::with_remove_locked_amount(5);
+
+		// removing unsuccessful vote when completed
+		assert_ok!(Voting::remove_vote(RuntimeOrigin::signed(1), Some(c), 3));
+		assert_eq!(HooksHandler::last_on_remove_vote_data(), Some((1, 3, Some(false))));
+		assert_eq!(HooksHandler::last_locked_if_unsuccessful_vote_data(), Some((1, 3)));
+
+		// Removing unsuccessful vote when completed should lock if given amount from the hook
+		assert_ok!(Voting::unlock(RuntimeOrigin::signed(1), c, 1));
+		assert_eq!(Balances::usable_balance(1), 5);
 	});
 }
