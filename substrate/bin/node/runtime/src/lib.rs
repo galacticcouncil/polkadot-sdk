@@ -380,6 +380,7 @@ impl pallet_utility::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
 	type PalletsOrigin = OriginCaller;
+	type BatchHook = ();
 	type WeightInfo = pallet_utility::weights::SubstrateWeight<Runtime>;
 }
 
@@ -1016,6 +1017,7 @@ impl pallet_conviction_voting::Config for Runtime {
 	type Polls = Referenda;
 	type BlockNumberProvider = System;
 	type VotingHooks = ();
+	type VoteRemovalOrigin = frame_system::EnsureNever<AccountId>;
 }
 
 parameter_types! {
