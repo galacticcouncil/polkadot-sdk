@@ -90,7 +90,7 @@ use sp_api::{ApiExt, ProvideRuntimeApi};
 use sp_application_crypto::AppPublic;
 use sp_blockchain::HeaderBackend;
 use sp_consensus_aura::AuraApi;
-use sp_core::{crypto::Pair, traits::SpawnNamed, U256};
+use sp_core::{crypto::Pair, traits::SpawnEssentialNamed, U256};
 use sp_inherents::CreateInherentDataProviders;
 use sp_keystore::KeystorePtr;
 use sp_runtime::traits::{Block as BlockT, Member, NumberFor, One};
@@ -178,7 +178,7 @@ pub fn run<Block, P, BI, CIDP, Client, Backend, RClient, CHP, Proposer, CS, Spaw
 	P: Pair + Send + Sync + 'static,
 	P::Public: AppPublic + Member + Codec,
 	P::Signature: TryFrom<Vec<u8>> + Member + Codec,
-	Spawner: SpawnNamed + Clone + 'static,
+	Spawner: SpawnEssentialNamed + Clone + 'static,
 {
 	let Params {
 		create_inherent_data_providers,
@@ -237,12 +237,12 @@ pub fn run<Block, P, BI, CIDP, Client, Backend, RClient, CHP, Proposer, CS, Spaw
 	let block_builder_fut =
 		run_block_builder::<Block, P, _, _, _, _, _, _, _, _>(block_builder_params);
 
-	spawner.spawn_blocking(
+	spawner.spawn_essential_blocking(
 		"slot-based-block-builder",
 		Some("slot-based-collator"),
 		block_builder_fut.boxed(),
 	);
-	spawner.spawn_blocking(
+	spawner.spawn_essential_blocking(
 		"slot-based-collation",
 		Some("slot-based-collator"),
 		collation_task_fut.boxed(),

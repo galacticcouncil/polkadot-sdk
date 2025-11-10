@@ -64,7 +64,7 @@ use sc_service::{Configuration, Error, TaskManager};
 use sc_telemetry::TelemetryHandle;
 use sc_transaction_pool::TransactionPoolHandle;
 use sp_api::ProvideRuntimeApi;
-use sp_core::traits::SpawnNamed;
+use sp_core::traits::SpawnEssentialNamed;
 use sp_inherents::CreateInherentDataProviders;
 use sp_keystore::KeystorePtr;
 use sp_runtime::{
@@ -278,7 +278,7 @@ where
 		CHP: cumulus_client_consensus_common::ValidationCodeHashProvider<Hash> + Send + 'static,
 		Proposer: ProposerInterface<Block> + Send + Sync + 'static,
 		CS: CollatorServiceInterface<Block> + Send + Sync + Clone + 'static,
-		Spawner: SpawnNamed + Clone + 'static,
+		Spawner: SpawnEssentialNamed + Clone + 'static,
 	{
 		slot_based::run::<Block, <AuraId as AppCrypto>::Pair, _, _, _, _, _, _, _, _, _>(
 			params_with_export,
@@ -364,7 +364,7 @@ where
 			reinitialize: false,
 			slot_offset: Duration::from_secs(1),
 			block_import_handle,
-			spawner: task_manager.spawn_handle(),
+			spawner: task_manager.spawn_essential_handle(),
 			export_pov: node_extra_args.export_pov,
 			max_pov_percentage: node_extra_args.max_pov_percentage,
 		};

@@ -460,7 +460,7 @@ where
 				block_status: client.clone(),
 				announce_block,
 				runtime_api: client.clone(),
-				spawner: task_manager.spawn_handle(),
+				spawner: task_manager.spawn_essential_handle(),
 				para_id,
 				parachain_consensus: Box::new(NullConsensus) as Box<_>,
 				key: collator_key,
