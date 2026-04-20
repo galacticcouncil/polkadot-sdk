@@ -52,6 +52,7 @@ impl pallet_utility::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
 	type PalletsOrigin = OriginCaller;
+	type BatchHook = ();
 	type WeightInfo = ();
 }
 
@@ -549,6 +550,10 @@ fn pure_works() {
 			}
 			.into(),
 		);
+		let record = PureProxyCreationInfo::<Test>::get(&anon).expect("record populated");
+		assert_eq!(record.spawner, 1);
+		assert_eq!(record.proxy_type, ProxyType::Any);
+		assert_eq!(record.index, 0);
 
 		// other calls to pure allowed as long as they're not exactly the same.
 		assert_ok!(Proxy::create_pure(RuntimeOrigin::signed(1), ProxyType::JustTransfer, 0, 0));
@@ -605,6 +610,39 @@ fn pure_works() {
 			}
 			.into(),
 		);
+		assert!(PureProxyCreationInfo::<Test>::get(&anon).is_none());
+	});
+}
+
+#[test]
+fn pure_proxy_creation_info_records_height_and_ext_index() {
+	new_test_ext().execute_with(|| {
+		Balances::make_free_balance_be(&1, 100);
+
+		System::set_block_number(5);
+		System::set_extrinsic_index(3);
+		assert_ok!(Proxy::create_pure(RuntimeOrigin::signed(1), ProxyType::Any, 0, 0));
+		let pure_a = Proxy::pure_account(&1, &ProxyType::Any, 0, Some((5, 3)));
+		let info_a = PureProxyCreationInfo::<Test>::get(&pure_a).expect("record a");
+		assert_eq!(info_a.spawner, 1);
+		assert_eq!(info_a.proxy_type, ProxyType::Any);
+		assert_eq!(info_a.index, 0);
+		assert_eq!(info_a.height, 5);
+		assert_eq!(info_a.ext_index, 3);
+
+		System::set_block_number(7);
+		System::set_extrinsic_index(1);
+		assert_ok!(Proxy::create_pure(RuntimeOrigin::signed(1), ProxyType::Any, 0, 0));
+		let pure_b = Proxy::pure_account(&1, &ProxyType::Any, 0, Some((7, 1)));
+		assert_ne!(pure_a, pure_b);
+		let info_b = PureProxyCreationInfo::<Test>::get(&pure_b).expect("record b");
+		assert_eq!(info_b.height, 7);
+		assert_eq!(info_b.ext_index, 1);
+
+		// Killing one leaves the other record intact.
+		assert_ok!(Proxy::kill_pure(RuntimeOrigin::signed(pure_a), 1, ProxyType::Any, 0, 5, 3));
+		assert!(PureProxyCreationInfo::<Test>::get(&pure_a).is_none());
+		assert!(PureProxyCreationInfo::<Test>::get(&pure_b).is_some());
 	});
 }
 

@@ -89,6 +89,32 @@ pub struct Announcement<AccountId, Hash, BlockNumber> {
 	height: BlockNumber,
 }
 
+/// Metadata captured at the time a pure proxy was created, sufficient to
+/// reconstruct the arguments required by `kill_pure` without an indexer.
+#[derive(
+	Encode,
+	Decode,
+	DecodeWithMemTracking,
+	Clone,
+	Eq,
+	PartialEq,
+	RuntimeDebug,
+	MaxEncodedLen,
+	TypeInfo,
+)]
+pub struct PureCreationRecord<AccountId, ProxyType, BlockNumber> {
+	/// The account that called `create_pure`.
+	pub spawner: AccountId,
+	/// The proxy type passed to `create_pure`.
+	pub proxy_type: ProxyType,
+	/// The disambiguation index passed to `create_pure`.
+	pub index: u16,
+	/// The block height at which `create_pure` was processed.
+	pub height: BlockNumber,
+	/// The extrinsic index within that block.
+	pub ext_index: u32,
+}
+
 /// The type of deposit
 #[derive(
 	Encode,
@@ -334,7 +360,9 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-			let pure = Self::pure_account(&who, &proxy_type, index, None);
+			let height = T::BlockNumberProvider::current_block_number();
+			let ext_index = frame_system::Pallet::<T>::extrinsic_index().unwrap_or_default();
+			let pure = Self::pure_account(&who, &proxy_type, index, Some((height, ext_index)));
 			ensure!(!Proxies::<T>::contains_key(&pure), Error::<T>::Duplicate);
 
 			let proxy_def =
@@ -346,6 +374,16 @@ pub mod pallet {
 			T::Currency::reserve(&who, deposit)?;
 
 			Proxies::<T>::insert(&pure, (bounded_proxies, deposit));
+			PureProxyCreationInfo::<T>::insert(
+				&pure,
+				PureCreationRecord {
+					spawner: who.clone(),
+					proxy_type: proxy_type.clone(),
+					index,
+					height,
+					ext_index,
+				},
+			);
 			Self::deposit_event(Event::PureCreated {
 				pure,
 				who,
@@ -390,6 +428,7 @@ pub mod pallet {
 			ensure!(proxy == who, Error::<T>::NoPermission);
 
 			let (_, deposit) = Proxies::<T>::take(&who);
+			PureProxyCreationInfo::<T>::remove(&who);
 			T::Currency::unreserve(&spawner, deposit);
 
 			Self::deposit_event(Event::PureKilled {
@@ -756,6 +795,18 @@ pub mod pallet {
 			BalanceOf<T>,
 		),
 		ValueQuery,
+	>;
+
+	/// Metadata recorded when a pure proxy is created, keyed by the pure proxy
+	/// account. Allows reconstructing the `kill_pure` arguments without an
+	/// indexer. Populated by `create_pure` and cleared by `kill_pure`.
+	#[pallet::storage]
+	pub type PureProxyCreationInfo<T: Config> = StorageMap<
+		_,
+		Twox64Concat,
+		T::AccountId,
+		PureCreationRecord<T::AccountId, T::ProxyType, BlockNumberFor<T>>,
+		OptionQuery,
 	>;
 
 	#[pallet::view_functions]
