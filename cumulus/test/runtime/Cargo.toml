@@ -10,44 +10,40 @@ workspace = true
 
 [dependencies]
 codec = { features = ["derive"], workspace = true }
+cumulus-pallet-aura-ext.workspace = true
+cumulus-pallet-parachain-system.workspace = true
+cumulus-pallet-weight-reclaim.workspace = true
+cumulus-primitives-aura.workspace = true
+cumulus-primitives-core.workspace = true
+frame-executive.workspace = true
+frame-support.workspace = true
+frame-system-rpc-runtime-api.workspace = true
+frame-system.workspace = true
+pallet-aura.workspace = true
+pallet-authorship.workspace = true
+pallet-balances.workspace = true
+pallet-glutton.workspace = true
+pallet-message-queue.workspace = true
+pallet-session.workspace = true
+pallet-sudo.workspace = true
+pallet-timestamp.workspace = true
+pallet-transaction-payment.workspace = true
+parachain-info.workspace = true
 scale-info = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
-
-# Substrate
-frame-executive = { workspace = true }
-frame-support = { workspace = true }
-frame-system = { workspace = true }
-frame-system-rpc-runtime-api = { workspace = true }
-pallet-aura = { workspace = true }
-pallet-authorship = { workspace = true }
-pallet-balances = { workspace = true }
-pallet-glutton = { workspace = true }
-pallet-message-queue = { workspace = true }
-pallet-session = { workspace = true }
-pallet-sudo = { workspace = true }
-pallet-timestamp = { workspace = true }
-pallet-transaction-payment = { workspace = true }
-sp-api = { workspace = true }
-sp-block-builder = { workspace = true }
-sp-consensus-aura = { workspace = true }
-sp-core = { workspace = true }
-sp-genesis-builder = { workspace = true }
-sp-inherents = { workspace = true }
-sp-io = { workspace = true }
-sp-keyring = { workspace = true }
-sp-offchain = { workspace = true }
-sp-runtime = { workspace = true }
-sp-session = { workspace = true }
-sp-transaction-pool = { workspace = true }
-sp-version = { workspace = true }
-
-# Cumulus
-cumulus-pallet-aura-ext = { workspace = true }
-cumulus-pallet-parachain-system = { workspace = true }
-cumulus-pallet-weight-reclaim = { workspace = true }
-cumulus-primitives-aura = { workspace = true }
-cumulus-primitives-core = { workspace = true }
-parachain-info = { workspace = true }
+sp-api.workspace = true
+sp-block-builder.workspace = true
+sp-consensus-aura.workspace = true
+sp-core.workspace = true
+sp-genesis-builder.workspace = true
+sp-inherents.workspace = true
+sp-io.workspace = true
+sp-keyring.workspace = true
+sp-offchain.workspace = true
+sp-runtime.workspace = true
+sp-session.workspace = true
+sp-transaction-pool.workspace = true
+sp-version.workspace = true
 
 [build-dependencies]
 substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
@@ -93,6 +89,8 @@ std = [
 	"substrate-wasm-builder",
 ]
 increment-spec-version = []
+# A runtime which expects to build behind the relay chain tip.
+relay-parent-offset = []
 # A runtime with elastic-scaling configuration.
 elastic-scaling = []
 # A runtime with low slot duration of 500ms for low-latency testing with 12 cores.
@@ -103,3 +101,5 @@ elastic-scaling-multi-block-slot = []
 experimental-ump-signals = [
 	"cumulus-pallet-parachain-system/experimental-ump-signals",
 ]
+# A runtime with 12s slot duration which only authors one block per slot.
+sync-backing = []

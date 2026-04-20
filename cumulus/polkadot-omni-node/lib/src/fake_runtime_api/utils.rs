@@ -59,6 +59,12 @@ macro_rules! impl_node_runtime_apis {
 				}
 			}
 
+			impl cumulus_primitives_core::RelayParentOffsetApi<$block> for $runtime {
+				fn relay_parent_offset() -> u32 {
+					unimplemented!()
+				}
+			}
+
 			impl sp_consensus_aura::AuraApi<$block, $aura_id> for $runtime {
 				fn slot_duration() -> sp_consensus_aura::SlotDuration {
 					unimplemented!()
@@ -224,6 +230,15 @@ macro_rules! impl_node_runtime_apis {
 				}
 
 				fn preset_names() -> Vec<sp_genesis_builder::PresetId> {
+					unimplemented!()
+				}
+			}
+
+			impl sp_statement_store::runtime_api::ValidateStatement<$block> for $runtime {
+				fn validate_statement(
+					_source: sp_statement_store::runtime_api::StatementSource,
+					_statement: sp_statement_store::Statement,
+				) -> Result<sp_statement_store::runtime_api::ValidStatement, sp_statement_store::runtime_api::InvalidStatement> {
 					unimplemented!()
 				}
 			}

@@ -89,6 +89,11 @@ pub type Multiplier = FixedU128;
 
 type BalanceOf<T> = <<T as Config>::OnChargeTransaction as OnChargeTransaction<T>>::Balance;
 
+//NOTE: we want to have some non-frotrunable txs submitted from OCW so we are capping max users' transactions
+//priority to this value. Our non-frontrunable txs should have priority from `[MAX_USER_TX_PRIORITY, TransactionPriority::MAX>`
+const MAX_USER_TX_PRIORITY: TransactionPriority =
+	TransactionPriority::MAX.saturating_sub(1_000_000_000u64);
+
 /// A struct to update the weight multiplier per block. It implements `Convert<Multiplier,
 /// Multiplier>`, meaning that it can convert the previous multiplier to the next one. This should
 /// be called on `on_finalize` of a block, prior to potentially cleaning the weight data from the
@@ -250,8 +255,8 @@ where
 		let diff = Multiplier::saturating_from_rational(diff_abs, max_limiting_dimension.max(1));
 		let diff_squared = diff.saturating_mul(diff);
 
-		let v_squared_2 = adjustment_variable.saturating_mul(adjustment_variable) /
-			Multiplier::saturating_from_integer(2);
+		let v_squared_2 = adjustment_variable.saturating_mul(adjustment_variable)
+			/ Multiplier::saturating_from_integer(2);
 
 		let first_term = adjustment_variable.saturating_mul(diff);
 		let second_term = v_squared_2.saturating_mul(diff_squared);
@@ -454,15 +459,15 @@ pub mod pallet {
 			// at most be maximum block weight. Make sure that this can fit in a multiplier without
 			// loss.
 			assert!(
-				<Multiplier as sp_runtime::traits::Bounded>::max_value() >=
-					Multiplier::checked_from_integer::<u128>(
+				<Multiplier as sp_runtime::traits::Bounded>::max_value()
+					>= Multiplier::checked_from_integer::<u128>(
 						T::BlockWeights::get().max_block.ref_time().try_into().unwrap()
 					)
 					.unwrap(),
 			);
 
-			let target = T::FeeMultiplierUpdate::target() *
-				T::BlockWeights::get().get(DispatchClass::Normal).max_total.expect(
+			let target = T::FeeMultiplierUpdate::target()
+				* T::BlockWeights::get().get(DispatchClass::Normal).max_total.expect(
 					"Setting `max_total` for `Normal` dispatch class is not compatible with \
 					`transaction-payment` pallet.",
 				);
@@ -471,7 +476,7 @@ pub mod pallet {
 			if addition == Weight::zero() {
 				// this is most likely because in a test setup we set everything to ()
 				// or to `ConstFeeMultiplier`.
-				return
+				return;
 			}
 
 			// This is the minimum value of the multiplier. Make sure that if we collapse to this
@@ -812,7 +817,8 @@ where
 		// To distribute no-tip transactions a little bit, we increase the tip value by one.
 		// This means that given two transactions without a tip, smaller one will be preferred.
 		let tip = tip.saturating_add(One::one());
-		let scaled_tip = max_reward(tip);
+		//NOTE: Look at comment for `MAX_USER_TX_PRIORITY`.
+		let scaled_tip = max_reward(tip).min(MAX_USER_TX_PRIORITY.saturated_into());
 
 		match info.class {
 			DispatchClass::Normal => {
@@ -968,7 +974,7 @@ where
 			Pre::Charge { tip, who, imbalance } => (tip, who, imbalance),
 			Pre::NoCharge { refund } => {
 				// No-op: Refund everything
-				return Ok(refund)
+				return Ok(refund);
 			},
 		};
 		let actual_fee = Pallet::<T>::compute_actual_fee(len as u32, info, &post_info, tip);

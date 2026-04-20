@@ -142,8 +142,6 @@ mod tests {
 			// No offence exist so far
 			assert!(staking_classic::UnappliedSlashes::<rc::Runtime>::get(4).is_empty());
 
-			dbg!(pallet_session::Validators::<rc::Runtime>::get());
-
 			assert_ok!(RootOffences::create_offence(
 				rc::RuntimeOrigin::root(),
 				vec![(2, Perbill::from_percent(100))],
@@ -456,7 +454,7 @@ mod tests {
 	}
 
 	#[test]
-	fn ah_know_good_era_duration() {
+	fn ah_knows_good_era_duration() {
 		// era duration and rewards work.
 	}
 
@@ -466,7 +464,7 @@ mod tests {
 	}
 
 	#[test]
-	fn overlapping_election() {
+	fn overlapping_election_wont_happen() {
 		// while one election is ongoing, enough sessions pass that we think we should plan yet
 		// another era.
 	}

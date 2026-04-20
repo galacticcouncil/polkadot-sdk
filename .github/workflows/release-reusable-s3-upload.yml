@@ -46,13 +46,17 @@ jobs:
             path: release-artifacts/${{ inputs.target }}/${{ inputs.package }}
 
         - name: Configure AWS Credentials
-          uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+          uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
           with:
             aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
             aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
             aws-region: ${{ env.AWS_REGION }}
 
         - name: Upload ${{ inputs.package }} artifacts to s3
+          env:
+            PACKAGE: ${{ inputs.package }}
+            RELEASE_TAG: ${{ inputs.release_tag }}
+            TARGET: ${{ inputs.target }}
           run: |
             . ./.github/scripts/release/release_lib.sh
-            upload_s3_release ${{ inputs.package }} ${{ inputs.release_tag }} ${{ inputs.target }}
+            upload_s3_release "$PACKAGE" "$RELEASE_TAG" "$TARGET"

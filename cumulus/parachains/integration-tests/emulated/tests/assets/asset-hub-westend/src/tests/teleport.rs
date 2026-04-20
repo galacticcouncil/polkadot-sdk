@@ -27,7 +27,7 @@ fn para_origin_assertions(t: SystemParaToRelayTest) {
 	type RuntimeEvent = <AssetHubWestend as Chain>::RuntimeEvent;
 
 	AssetHubWestend::assert_xcm_pallet_attempted_complete(Some(Weight::from_parts(
-		730_053_000,
+		302_568_000,
 		4_000,
 	)));
 
@@ -169,57 +169,124 @@ fn system_para_limited_teleport_assets(t: SystemParaToRelayTest) -> DispatchResu
 }
 
 fn para_to_system_para_transfer_assets(t: ParaToSystemParaTest) -> DispatchResult {
-	<PenpalA as PenpalAPallet>::PolkadotXcm::transfer_assets(
+	type Runtime = <PenpalA as Chain>::Runtime;
+	let remote_fee_id: AssetId = t
+		.args
+		.assets
+		.clone()
+		.into_inner()
+		.get(t.args.fee_asset_item as usize)
+		.ok_or(pallet_xcm::Error::<Runtime>::Empty)?
+		.clone()
+		.id;
+
+	<PenpalA as PenpalAPallet>::PolkadotXcm::transfer_assets_using_type_and_then(
 		t.signed_origin,
 		bx!(t.args.dest.into()),
-		bx!(t.args.beneficiary.into()),
 		bx!(t.args.assets.into()),
-		t.args.fee_asset_item,
+		bx!(TransferType::Teleport),
+		bx!(remote_fee_id.into()),
+		bx!(TransferType::DestinationReserve),
+		bx!(VersionedXcm::from(
+			Xcm::<()>::builder_unsafe()
+				.deposit_asset(AllCounted(2), t.args.beneficiary)
+				.build()
+		)),
 		t.args.weight_limit,
 	)
 }
 
 fn system_para_to_para_transfer_assets(t: SystemParaToParaTest) -> DispatchResult {
-	<AssetHubWestend as AssetHubWestendPallet>::PolkadotXcm::transfer_assets(
+	type Runtime = <AssetHubWestend as Chain>::Runtime;
+	let remote_fee_id: AssetId = t
+		.args
+		.assets
+		.clone()
+		.into_inner()
+		.get(t.args.fee_asset_item as usize)
+		.ok_or(pallet_xcm::Error::<Runtime>::Empty)?
+		.clone()
+		.id;
+
+	<AssetHubWestend as AssetHubWestendPallet>::PolkadotXcm::transfer_assets_using_type_and_then(
 		t.signed_origin,
 		bx!(t.args.dest.into()),
-		bx!(t.args.beneficiary.into()),
 		bx!(t.args.assets.into()),
-		t.args.fee_asset_item,
+		bx!(TransferType::Teleport),
+		bx!(remote_fee_id.into()),
+		bx!(TransferType::LocalReserve),
+		bx!(VersionedXcm::from(
+			Xcm::<()>::builder_unsafe()
+				.deposit_asset(AllCounted(2), t.args.beneficiary)
+				.build()
+		)),
 		t.args.weight_limit,
 	)
 }
 
 #[test]
-fn teleport_to_other_system_parachains_works() {
+fn teleport_via_limited_teleport_assets_to_other_system_parachains_works() {
 	let amount = ASSET_HUB_WESTEND_ED * 100;
 	let native_asset: Assets = (Parent, amount).into();
 
 	test_parachain_is_trusted_teleporter!(
-		AssetHubWestend,          // Origin
-		AssetHubWestendXcmConfig, // XCM Configuration
-		vec![BridgeHubWestend],   // Destinations
-		(native_asset, amount)
+		AssetHubWestend,        // Origin
+		vec![BridgeHubWestend], // Destinations
+		(native_asset, amount),
+		limited_teleport_assets
 	);
 }
 
 #[test]
-fn teleport_from_and_to_relay() {
+fn teleport_via_transfer_assets_to_other_system_parachains_works() {
+	let amount = ASSET_HUB_WESTEND_ED * 100;
+	let native_asset: Assets = (Parent, amount).into();
+
+	test_parachain_is_trusted_teleporter!(
+		AssetHubWestend,        // Origin
+		vec![BridgeHubWestend], // Destinations
+		(native_asset, amount),
+		transfer_assets
+	);
+}
+
+#[test]
+fn teleport_via_limited_teleport_assets_from_and_to_relay() {
 	let amount = WESTEND_ED * 100;
 	let native_asset: Assets = (Here, amount).into();
 
 	test_relay_is_trusted_teleporter!(
 		Westend,
-		WestendXcmConfig,
 		vec![AssetHubWestend],
-		(native_asset, amount)
+		(native_asset, amount),
+		limited_teleport_assets
 	);
 
 	test_parachain_is_trusted_teleporter_for_relay!(
 		AssetHubWestend,
-		AssetHubWestendXcmConfig,
 		Westend,
-		amount
+		amount,
+		limited_teleport_assets
+	);
+}
+
+#[test]
+fn teleport_via_transfer_assets_from_and_to_relay() {
+	let amount = WESTEND_ED * 100;
+	let native_asset: Assets = (Here, amount).into();
+
+	test_relay_is_trusted_teleporter!(
+		Westend,
+		vec![AssetHubWestend],
+		(native_asset, amount),
+		transfer_assets
+	);
+
+	test_parachain_is_trusted_teleporter_for_relay!(
+		AssetHubWestend,
+		Westend,
+		amount,
+		transfer_assets
 	);
 }
 

@@ -22,7 +22,8 @@ use XcmpMessageFormat::*;
 use codec::Input;
 use cumulus_primitives_core::{ParaId, XcmpMessageHandler};
 use frame_support::{
-	assert_err, assert_noop, assert_ok, assert_storage_noop, hypothetically, traits::Hooks,
+	assert_err, assert_noop, assert_ok, assert_storage_noop, hypothetically,
+	traits::{BatchFootprint, Hooks},
 	StorageNoopGuard,
 };
 use mock::{new_test_ext, ParachainSystem, RuntimeOrigin as Origin, Test, XcmpQueue};
@@ -52,6 +53,44 @@ fn generate_mock_xcm_page(start_idx: usize, xcm_count: usize) -> Vec<u8> {
 		data.extend(xcm);
 	}
 	data
+}
+
+#[test]
+fn handling_signals_works() {
+	new_test_ext().execute_with(|| {
+		fn get_channel(recipient: ParaId) -> Option<OutboundChannelDetails> {
+			<OutboundXcmpStatus<Test>>::get()
+				.into_iter()
+				.find(|item| item.recipient == recipient)
+		}
+
+		// Suspend works;
+		let page = (XcmpMessageFormat::Signals, ChannelSignal::Suspend).encode();
+		XcmpQueue::handle_xcmp_messages(once((1000.into(), 1, page.as_slice())), Weight::MAX);
+		let channel = get_channel(1000.into()).unwrap();
+		assert_eq!(channel.state, OutboundState::Suspended);
+
+		// Resume works
+		let page = (XcmpMessageFormat::Signals, ChannelSignal::Resume).encode();
+		XcmpQueue::handle_xcmp_messages(once((1000.into(), 1, page.as_slice())), Weight::MAX);
+		let channel = get_channel(1000.into());
+		assert_eq!(channel, None);
+
+		// Only the first 3 signals are processed
+		let page = (
+			XcmpMessageFormat::Signals,
+			ChannelSignal::Suspend,
+			ChannelSignal::Resume,
+			ChannelSignal::Suspend,
+			ChannelSignal::Resume,
+			ChannelSignal::Resume,
+			ChannelSignal::Resume,
+		)
+			.encode();
+		XcmpQueue::handle_xcmp_messages(once((1000.into(), 1, page.as_slice())), Weight::MAX);
+		let channel = get_channel(1000.into()).unwrap();
+		assert_eq!(channel.state, OutboundState::Suspended);
+	})
 }
 
 #[test]
@@ -210,9 +249,12 @@ fn xcm_enqueueing_starts_dropping_on_out_of_weight() {
 
 			total_size += xcm.len();
 			let required_weight = <<Test as Config>::WeightInfo>::enqueue_xcmp_messages(
-				idx as u32 + 1,
-				idx + 1,
-				total_size,
+				0,
+				&BatchFootprint {
+					msgs_count: idx + 1,
+					size_in_bytes: total_size,
+					new_pages_count: idx as u32 + 1,
+				},
 			);
 
 			let mut weight_meter = WeightMeter::with_limit(required_weight);
@@ -939,8 +981,8 @@ fn verify_fee_factor_increase_and_decrease() {
 	xcmp_message.extend(versioned_xcm.encode());
 
 	new_test_ext().execute_with(|| {
-		let initial = InitialFactor::get();
-		assert_eq!(DeliveryFeeFactor::<Test>::get(sibling_para_id), initial);
+		let initial = Pallet::<Test>::MIN_FEE_FACTOR;
+		assert_eq!(Pallet::<Test>::get_fee_factor(sibling_para_id), initial);
 
 		// Open channel so messages can actually be sent
 		ParachainSystem::open_custom_outbound_hrmp_channel_for_benchmarks_or_tests(

@@ -31,13 +31,16 @@ use codec::{Decode, Encode};
 
 use cumulus_primitives_core::relay_chain::vstaging::{UMPSignal, UMP_SEPARATOR};
 use frame_support::{
-	traits::{ExecuteBlock, ExtrinsicCall, Get, IsSubType},
+	traits::{ExecuteBlock, Get, IsSubType},
 	BoundedVec,
 };
-use sp_core::storage::{ChildInfo, StateVersion};
+use sp_core::storage::{well_known_keys, ChildInfo, StateVersion};
 use sp_externalities::{set_and_run_with_externalities, Externalities};
-use sp_io::KillStorageResult;
-use sp_runtime::traits::{Block as BlockT, ExtrinsicLike, HashingFor, Header as HeaderT};
+use sp_io::{hashing::blake2_128, KillStorageResult};
+use sp_runtime::traits::{
+	Block as BlockT, ExtrinsicCall, ExtrinsicLike, HashingFor, Header as HeaderT,
+};
+
 use sp_state_machine::OverlayedChanges;
 use sp_trie::ProofSizeProvider;
 use trie_recorder::SizeOnlyRecorderProvider;
@@ -140,6 +143,12 @@ where
 	let block_data = codec::decode_from_bytes::<ParachainBlockData<B>>(block_data)
 		.expect("Invalid parachain block data");
 
+	// Initialize hashmaps randomness.
+	sp_trie::add_extra_randomness(build_seed_from_head_data(
+		&block_data,
+		relay_parent_storage_root,
+	));
+
 	let mut parent_header =
 		codec::decode_from_bytes::<B::Header>(parachain_head.clone()).expect("Invalid parent head");
 
@@ -154,6 +163,17 @@ where
 		parent_header.hash(),
 		"Parachain head needs to be the parent of the first block"
 	);
+
+	blocks.iter().fold(parent_header.hash(), |p, b| {
+		assert_eq!(
+			p,
+			*b.header().parent_hash(),
+			"Not a valid chain of blocks :(; {:?} not a parent of {:?}?",
+			array_bytes::bytes2hex("0x", p.as_ref()),
+			array_bytes::bytes2hex("0x", b.header().parent_hash().as_ref()),
+		);
+		b.header().hash()
+	});
 
 	let mut processed_downward_messages = 0;
 	let mut upward_messages = BoundedVec::default();
@@ -246,6 +266,10 @@ where
 				E::execute_block(block);
 			},
 		);
+
+		if overlay.storage(well_known_keys::CODE).is_some() && num_blocks > 1 {
+			panic!("When applying a runtime upgrade, only one block per PoV is allowed. Received {num_blocks}.")
+		}
 
 		run_with_externalities_and_recorder::<B, _, _>(
 			&backend,
@@ -389,6 +413,27 @@ fn validate_validation_data(
 		relay_parent_storage_root, validation_data.relay_parent_storage_root,
 		"Relay parent storage root doesn't match",
 	);
+}
+
+/// Build a seed from the head data of the parachain block.
+///
+/// Uses both the relay parent storage root and the hash of the blocks
+/// in the block data, to make sure the seed changes every block and that
+/// the user cannot find about it ahead of time.
+fn build_seed_from_head_data<B: BlockT>(
+	block_data: &ParachainBlockData<B>,
+	relay_parent_storage_root: crate::relay_chain::Hash,
+) -> [u8; 16] {
+	let mut bytes_to_hash = Vec::with_capacity(
+		block_data.blocks().len() * size_of::<B::Hash>() + size_of::<crate::relay_chain::Hash>(),
+	);
+
+	bytes_to_hash.extend_from_slice(relay_parent_storage_root.as_ref());
+	block_data.blocks().iter().for_each(|block| {
+		bytes_to_hash.extend_from_slice(block.header().hash().as_ref());
+	});
+
+	blake2_128(&bytes_to_hash)
 }
 
 /// Run the given closure with the externalities and recorder set.

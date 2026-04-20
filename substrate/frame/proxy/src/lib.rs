@@ -57,6 +57,7 @@ type AccountIdLookupOf<T> = <<T as frame_system::Config>::Lookup as StaticLookup
 #[derive(
 	Encode,
 	Decode,
+	DecodeWithMemTracking,
 	Clone,
 	Copy,
 	Eq,
@@ -86,6 +87,32 @@ pub struct Announcement<AccountId, Hash, BlockNumber> {
 	call_hash: Hash,
 	/// The height at which the announcement was made.
 	height: BlockNumber,
+}
+
+/// Metadata captured at the time a pure proxy was created, sufficient to
+/// reconstruct the arguments required by `kill_pure` without an indexer.
+#[derive(
+	Encode,
+	Decode,
+	DecodeWithMemTracking,
+	Clone,
+	Eq,
+	PartialEq,
+	RuntimeDebug,
+	MaxEncodedLen,
+	TypeInfo,
+)]
+pub struct PureCreationRecord<AccountId, ProxyType, BlockNumber> {
+	/// The account that called `create_pure`.
+	pub spawner: AccountId,
+	/// The proxy type passed to `create_pure`.
+	pub proxy_type: ProxyType,
+	/// The disambiguation index passed to `create_pure`.
+	pub index: u16,
+	/// The block height at which `create_pure` was processed.
+	pub height: BlockNumber,
+	/// The extrinsic index within that block.
+	pub ext_index: u32,
 }
 
 /// The type of deposit
@@ -333,7 +360,9 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-			let pure = Self::pure_account(&who, &proxy_type, index, None);
+			let height = T::BlockNumberProvider::current_block_number();
+			let ext_index = frame_system::Pallet::<T>::extrinsic_index().unwrap_or_default();
+			let pure = Self::pure_account(&who, &proxy_type, index, Some((height, ext_index)));
 			ensure!(!Proxies::<T>::contains_key(&pure), Error::<T>::Duplicate);
 
 			let proxy_def =
@@ -345,6 +374,16 @@ pub mod pallet {
 			T::Currency::reserve(&who, deposit)?;
 
 			Proxies::<T>::insert(&pure, (bounded_proxies, deposit));
+			PureProxyCreationInfo::<T>::insert(
+				&pure,
+				PureCreationRecord {
+					spawner: who.clone(),
+					proxy_type: proxy_type.clone(),
+					index,
+					height,
+					ext_index,
+				},
+			);
 			Self::deposit_event(Event::PureCreated {
 				pure,
 				who,
@@ -364,7 +403,7 @@ pub mod pallet {
 		/// `pure` with corresponding parameters.
 		///
 		/// - `spawner`: The account that originally called `pure` to create this account.
-		/// - `index`: The disambiguation index originally passed to `pure`. Probably `0`.
+		/// - `index`: The disambiguation index originally passed to `create_pure`. Probably `0`.
 		/// - `proxy_type`: The proxy type originally passed to `pure`.
 		/// - `height`: The height of the chain when the call to `pure` was processed.
 		/// - `ext_index`: The extrinsic index in which the call to `pure` was processed.
@@ -389,7 +428,15 @@ pub mod pallet {
 			ensure!(proxy == who, Error::<T>::NoPermission);
 
 			let (_, deposit) = Proxies::<T>::take(&who);
+			PureProxyCreationInfo::<T>::remove(&who);
 			T::Currency::unreserve(&spawner, deposit);
+
+			Self::deposit_event(Event::PureKilled {
+				pure: who,
+				spawner,
+				proxy_type,
+				disambiguation_index: index,
+			});
 
 			Ok(())
 		}
@@ -664,6 +711,17 @@ pub mod pallet {
 			proxy_type: T::ProxyType,
 			disambiguation_index: u16,
 		},
+		/// A pure proxy was killed by its spawner.
+		PureKilled {
+			// The pure proxy account that was destroyed.
+			pure: T::AccountId,
+			// The account that created the pure proxy.
+			spawner: T::AccountId,
+			// The proxy type of the pure proxy that was destroyed.
+			proxy_type: T::ProxyType,
+			// The index originally passed to `create_pure` when this pure proxy was created.
+			disambiguation_index: u16,
+		},
 		/// An announcement was placed to make a call in the future.
 		Announced { real: T::AccountId, proxy: T::AccountId, call_hash: CallHashOf<T> },
 		/// A proxy was added.
@@ -739,6 +797,18 @@ pub mod pallet {
 		ValueQuery,
 	>;
 
+	/// Metadata recorded when a pure proxy is created, keyed by the pure proxy
+	/// account. Allows reconstructing the `kill_pure` arguments without an
+	/// indexer. Populated by `create_pure` and cleared by `kill_pure`.
+	#[pallet::storage]
+	pub type PureProxyCreationInfo<T: Config> = StorageMap<
+		_,
+		Twox64Concat,
+		T::AccountId,
+		PureCreationRecord<T::AccountId, T::ProxyType, BlockNumberFor<T>>,
+		OptionQuery,
+	>;
+
 	#[pallet::view_functions]
 	impl<T: Config> Pallet<T> {
 		/// Check if a `RuntimeCall` is allowed for a given `ProxyType`.
@@ -800,6 +870,7 @@ impl<T: Config> Pallet<T> {
 				frame_system::Pallet::<T>::extrinsic_index().unwrap_or_default(),
 			)
 		});
+
 		let entropy = (b"modlpy/proxy____", who, height, ext_index, proxy_type, index)
 			.using_encoded(blake2_256);
 		Decode::decode(&mut TrailingZeroInput::new(entropy.as_ref()))

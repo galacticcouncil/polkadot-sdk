@@ -301,13 +301,14 @@ mod benchmarks {
 		let pure_account = Pallet::<T>::pure_account(&caller, &T::ProxyType::default(), 0, None);
 		assert_last_event::<T>(
 			Event::PureCreated {
-				pure: pure_account,
+				pure: pure_account.clone(),
 				who: caller,
 				proxy_type: T::ProxyType::default(),
 				disambiguation_index: 0,
 			}
 			.into(),
 		);
+		assert!(PureProxyCreationInfo::<T>::contains_key(&pure_account));
 
 		Ok(())
 	}
@@ -341,6 +342,7 @@ mod benchmarks {
 		);
 
 		assert!(!Proxies::<T>::contains_key(&pure_account));
+		assert!(!PureProxyCreationInfo::<T>::contains_key(&pure_account));
 
 		Ok(())
 	}

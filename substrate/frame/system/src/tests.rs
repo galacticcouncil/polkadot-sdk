@@ -741,7 +741,7 @@ fn set_code_via_authorization_works() {
 		System::assert_has_event(
 			SysEvent::UpgradeAuthorized { code_hash: hash, check_version: true }.into(),
 		);
-		assert!(System::authorized_upgrade().is_some());
+		assert_eq!(System::authorized_upgrade().unwrap().code_hash(), &hash);
 
 		// Can't be sneaky
 		let mut bad_runtime = substrate_test_runtime_client::runtime::wasm_binary_unwrap().to_vec();
@@ -962,5 +962,18 @@ fn reclaim_works() {
 
 		System::note_applied_extrinsic(&Ok(().into()), Default::default());
 		assert_eq!(crate::ExtrinsicWeightReclaimed::<Test>::get(), Weight::zero());
+	});
+}
+
+#[test]
+#[should_panic(expected = "Block number must be strictly increasing.")]
+fn initialize_block_number_must_be_sequential() {
+	new_test_ext().execute_with(|| {
+		// Initialize block 1
+		System::initialize(&1, &[0u8; 32].into(), &Default::default());
+		System::finalize();
+
+		// Try to initialize block 3, skipping block 2 - this should panic
+		System::initialize(&3, &[0u8; 32].into(), &Default::default());
 	});
 }

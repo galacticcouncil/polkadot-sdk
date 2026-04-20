@@ -490,6 +490,7 @@ impl OverheadCmd {
 			state_pruning: None,
 			blocks_pruning: BlocksPruning::KeepAll,
 			source: database_source,
+			metrics_registry: None,
 		})?;
 
 		let genesis_block_builder = GenesisBlockBuilder::new_with_storage(
@@ -521,6 +522,7 @@ impl OverheadCmd {
 				wasm_runtime_substitutes: Default::default(),
 				enable_import_proof_recording: chain_type.requires_proof_recording(),
 			},
+			None,
 		)?);
 
 		Ok(client)

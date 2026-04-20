@@ -3,3 +3,12 @@
 
 #[cfg(feature = "zombie-ci")]
 mod elastic_scaling;
+
+#[cfg(feature = "zombie-ci")]
+mod sync_blocks;
+
+#[cfg(feature = "zombie-ci")]
+mod bootnodes;
+
+#[cfg(feature = "zombie-ci")]
+mod statement_store;

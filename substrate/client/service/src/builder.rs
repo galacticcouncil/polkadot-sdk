@@ -27,12 +27,13 @@ use crate::{
 };
 use futures::{select, FutureExt, StreamExt};
 use jsonrpsee::RpcModule;
-use log::info;
+use log::{debug, error, info};
 use prometheus_endpoint::Registry;
 use sc_chain_spec::{get_extension, ChainSpec};
 use sc_client_api::{
 	execution_extensions::ExecutionExtensions, proof_provider::ProofProvider, BadBlocks,
-	BlockBackend, BlockchainEvents, ExecutorProvider, ForkBlocks, StorageProvider, UsageProvider,
+	BlockBackend, BlockchainEvents, ExecutorProvider, ForkBlocks, KeysIter, StorageProvider,
+	TrieCacheContext, UsageProvider,
 };
 use sc_client_db::{Backend, BlocksPruning, DatabaseSettings, PruningMode};
 use sc_consensus::import_queue::{ImportQueue, ImportQueueService};
@@ -83,13 +84,14 @@ use sc_telemetry::{telemetry, ConnectionMessage, Telemetry, TelemetryHandle, SUB
 use sc_transaction_pool_api::{MaintainedTransactionPool, TransactionPool};
 use sc_utils::mpsc::{tracing_unbounded, TracingUnboundedSender};
 use sp_api::{CallApiAt, ProvideRuntimeApi};
-use sp_blockchain::{HeaderBackend, HeaderMetadata};
+use sp_blockchain::{HeaderBackend, HeaderMetadata, TransactionPriorityModifier};
 use sp_consensus::block_validation::{
 	BlockAnnounceValidator, Chain, DefaultBlockAnnounceValidator,
 };
 use sp_core::traits::{CodeExecutor, SpawnNamed};
 use sp_keystore::KeystorePtr;
 use sp_runtime::traits::{Block as BlockT, BlockIdTo, NumberFor, Zero};
+use sp_storage::{ChildInfo, ChildType, PrefixedStorageKey};
 use std::{
 	str::FromStr,
 	sync::Arc,
@@ -140,12 +142,13 @@ pub fn new_full_client<TBl, TRtApi, TExec>(
 	config: &Configuration,
 	telemetry: Option<TelemetryHandle>,
 	executor: TExec,
+	tx_priority_modifier: Option<TransactionPriorityModifier<TBl>>,
 ) -> Result<TFullClient<TBl, TRtApi, TExec>, Error>
 where
 	TBl: BlockT,
 	TExec: CodeExecutor + RuntimeVersionOf + Clone,
 {
-	new_full_parts(config, telemetry, executor).map(|parts| parts.0)
+	new_full_parts(config, telemetry, executor, tx_priority_modifier).map(|parts| parts.0)
 }
 
 /// Create the initial parts of a full node with the default genesis block builder.
@@ -154,6 +157,7 @@ pub fn new_full_parts_record_import<TBl, TRtApi, TExec>(
 	telemetry: Option<TelemetryHandle>,
 	executor: TExec,
 	enable_import_proof_recording: bool,
+	tx_priority_modifier: Option<TransactionPriorityModifier<TBl>>,
 ) -> Result<TFullParts<TBl, TRtApi, TExec>, Error>
 where
 	TBl: BlockT,
@@ -175,6 +179,7 @@ where
 		backend,
 		genesis_block_builder,
 		enable_import_proof_recording,
+		tx_priority_modifier,
 	)
 }
 /// Create the initial parts of a full node with the default genesis block builder.
@@ -182,12 +187,13 @@ pub fn new_full_parts<TBl, TRtApi, TExec>(
 	config: &Configuration,
 	telemetry: Option<TelemetryHandle>,
 	executor: TExec,
+	tx_priority_modifier: Option<TransactionPriorityModifier<TBl>>,
 ) -> Result<TFullParts<TBl, TRtApi, TExec>, Error>
 where
 	TBl: BlockT,
 	TExec: CodeExecutor + RuntimeVersionOf + Clone,
 {
-	new_full_parts_record_import(config, telemetry, executor, false)
+	new_full_parts_record_import(config, telemetry, executor, false, tx_priority_modifier)
 }
 
 /// Create the initial parts of a full node.
@@ -198,6 +204,7 @@ pub fn new_full_parts_with_genesis_builder<TBl, TRtApi, TExec, TBuildGenesisBloc
 	backend: Arc<TFullBackend<TBl>>,
 	genesis_block_builder: TBuildGenesisBlock,
 	enable_import_proof_recording: bool,
+	tx_priority_modifier: Option<TransactionPriorityModifier<TBl>>,
 ) -> Result<TFullParts<TBl, TRtApi, TExec>, Error>
 where
 	TBl: BlockT,
@@ -261,12 +268,90 @@ where
 				wasm_runtime_substitutes,
 				enable_import_proof_recording,
 			},
+			tx_priority_modifier,
 		)?;
+
+		if let Some(warm_up_strategy) = config.warm_up_trie_cache {
+			let storage_root = client.usage_info().chain.best_hash;
+			let backend_clone = backend.clone();
+
+			if warm_up_strategy.is_blocking() {
+				// We use the blocking strategy for testing purposes.
+				// So better to error out if it fails.
+				warm_up_trie_cache(backend_clone, storage_root)?;
+			} else {
+				task_manager.spawn_handle().spawn_blocking(
+					"warm-up-trie-cache",
+					None,
+					async move {
+						if let Err(e) = warm_up_trie_cache(backend_clone, storage_root) {
+							error!("Failed to warm up trie cache: {e}");
+						}
+					},
+				);
+			}
+		}
 
 		client
 	};
 
 	Ok((client, backend, keystore_container, task_manager))
+}
+
+fn child_info(key: Vec<u8>) -> Option<ChildInfo> {
+	let prefixed_key = PrefixedStorageKey::new(key);
+	ChildType::from_prefixed_key(&prefixed_key).and_then(|(child_type, storage_key)| {
+		(child_type == ChildType::ParentKeyId).then(|| ChildInfo::new_default(storage_key))
+	})
+}
+
+fn warm_up_trie_cache<TBl: BlockT>(
+	backend: Arc<TFullBackend<TBl>>,
+	storage_root: TBl::Hash,
+) -> Result<(), Error> {
+	use sc_client_api::backend::Backend;
+	use sp_state_machine::Backend as StateBackend;
+
+	let untrusted_state = || backend.state_at(storage_root, TrieCacheContext::Untrusted);
+	let trusted_state = || backend.state_at(storage_root, TrieCacheContext::Trusted);
+
+	debug!("Populating trie cache started",);
+	let start_time = std::time::Instant::now();
+	let mut keys_count = 0;
+	let mut child_keys_count = 0;
+	for key in KeysIter::<_, TBl>::new(untrusted_state()?, None, None)? {
+		if keys_count != 0 && keys_count % 100_000 == 0 {
+			debug!("{} keys and {} child keys have been warmed", keys_count, child_keys_count);
+		}
+		match child_info(key.0.clone()) {
+			Some(info) => {
+				for child_key in
+					KeysIter::<_, TBl>::new_child(untrusted_state()?, info.clone(), None, None)?
+				{
+					if trusted_state()?
+						.child_storage(&info, &child_key.0)
+						.unwrap_or_default()
+						.is_none()
+					{
+						debug!("Child storage value unexpectedly empty: {child_key:?}");
+					}
+					child_keys_count += 1;
+				}
+			},
+			None => {
+				if trusted_state()?.storage(&key.0).unwrap_or_default().is_none() {
+					debug!("Storage value unexpectedly empty: {key:?}");
+				}
+				keys_count += 1;
+			},
+		}
+	}
+	debug!(
+		"Trie cache populated with {keys_count} keys and {child_keys_count} child keys in {} s",
+		start_time.elapsed().as_secs_f32()
+	);
+
+	Ok(())
 }
 
 /// Creates a [`NativeElseWasmExecutor`](sc_executor::NativeElseWasmExecutor) according to
@@ -318,6 +403,7 @@ pub fn new_client<E, Block, RA, G>(
 	prometheus_registry: Option<Registry>,
 	telemetry: Option<TelemetryHandle>,
 	config: ClientConfig<Block>,
+	tx_priority_modifier: Option<TransactionPriorityModifier<Block>>,
 ) -> Result<
 	Client<
 		Backend<Block>,
@@ -352,6 +438,7 @@ where
 		prometheus_registry,
 		telemetry,
 		config,
+		tx_priority_modifier,
 	)
 }
 
@@ -515,6 +602,14 @@ where
 	let rpc_id_provider = config.rpc.id_provider.take();
 
 	// jsonrpsee RPC
+	// RPC-V2 specific metrics need to be registered before the RPC server is started,
+	// since we might have two instances running (one for the in-memory RPC and one for the network
+	// RPC).
+	let rpc_v2_metrics = config
+		.prometheus_registry()
+		.map(|registry| sc_rpc_spec_v2::transaction::TransactionMetrics::new(registry))
+		.transpose()?;
+
 	let gen_rpc_module = || {
 		gen_rpc_module(
 			task_manager.spawn_handle(),
@@ -529,6 +624,7 @@ where
 			config.blocks_pruning,
 			backend.clone(),
 			&*rpc_builder,
+			rpc_v2_metrics.clone(),
 		)
 	};
 
@@ -676,6 +772,7 @@ pub fn gen_rpc_module<TBl, TBackend, TCl, TRpc, TExPool>(
 	blocks_pruning: BlocksPruning,
 	backend: Arc<TBackend>,
 	rpc_builder: &(dyn Fn(SubscriptionTaskExecutor) -> Result<RpcModule<TRpc>, Error>),
+	metrics: Option<sc_rpc_spec_v2::transaction::TransactionMetrics>,
 ) -> Result<RpcModule<()>, Error>
 where
 	TBl: BlockT,
@@ -731,6 +828,7 @@ where
 		client.clone(),
 		transaction_pool.clone(),
 		task_executor.clone(),
+		metrics,
 	)
 	.into_rpc();
 
@@ -859,6 +957,7 @@ where
 		+ ProofProvider<Block>
 		+ HeaderBackend<Block>
 		+ BlockchainEvents<Block>
+		+ sp_blockchain::TransactionPriorityModifierT
 		+ 'static,
 	TxPool: TransactionPool<Block = Block, Hash = <Block as BlockT>::Hash> + 'static,
 	IQ: ImportQueue<Block> + 'static,

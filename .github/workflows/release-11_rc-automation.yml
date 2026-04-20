@@ -1,18 +1,14 @@
-name: Release - RC automation
+name: Release - RC tagging automation
 on:
-  # TODO: Activate it and delete old branches patterns, when the release process from stable is settled
-  #push:
-    # branches:
-    #   # Catches release-polkadot-v1.2.3, release-v1.2.3-rc1, etc
-    #   - release-v[0-9]+.[0-9]+.[0-9]+*
-    #   - release-cumulus-v[0-9]+*
-    #   - release-polkadot-v[0-9]+*
-    #   - stable
-
   workflow_dispatch:
     inputs:
       version:
         description: Current release/rc version in format polkadot-stableYYMM
+  workflow_call:
+    inputs:
+      version:
+        description: Current release/rc version in format polkadot-stableYYMM
+        type: string
 
 jobs:
   tag_rc:
@@ -38,7 +34,7 @@ jobs:
 
       - name: Generate content write token for the release automation
         id: generate_write_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
             app-id: ${{ vars.RELEASE_AUTOMATION_APP_ID }}
             private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
@@ -68,14 +64,16 @@ jobs:
         # if: ${{ steps.get_rel_product.outputs.product == 'polkadot' }}
         id: compute_tag
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           . ./.github/scripts/common/lib.sh
 
           # Get last rc tag if exists, else set it to {version}-rc1
-          if [[ -z "${{ inputs.version }}" ]]; then
+          if [[ -z "$INPUT_VERSION" ]]; then
             version=v$(get_polkadot_node_version_from_code)
           else
-            version=$(validate_stable_tag ${{ inputs.version }})
+            version=$(validate_stable_tag "$INPUT_VERSION")
           fi
           echo "$version"
           echo "version=$version" >> $GITHUB_OUTPUT
