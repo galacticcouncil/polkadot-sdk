@@ -36,6 +36,8 @@ cumulus-relay-chain-minimal-node.workspace = true
 cumulus-relay-chain-streams.default-features = true
 cumulus-relay-chain-streams.workspace = true
 futures = { workspace = true }
+polkadot-overseer.default-features = true
+polkadot-overseer.workspace = true
 polkadot-primitives.default-features = true
 polkadot-primitives.workspace = true
 prometheus = { workspace = true }
