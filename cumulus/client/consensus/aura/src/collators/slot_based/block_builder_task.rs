@@ -54,7 +54,10 @@ use sp_consensus_aura::AuraApi;
 use sp_core::crypto::Pair;
 use sp_inherents::CreateInherentDataProviders;
 use sp_keystore::KeystorePtr;
-use sp_runtime::traits::{Block as BlockT, Header as HeaderT, Member};
+use sp_runtime::{
+	traits::{Block as BlockT, Header as HeaderT, Member},
+	Saturating,
+};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 /// Parameters for [`run_block_builder`].
@@ -234,18 +237,23 @@ where
 
 			let relay_parent = rp_data.relay_parent().hash();
 
-			let Some((included_header, parent)) =
+			let Some(parent_search_result) =
 				crate::collators::find_parent(relay_parent, para_id, &*para_backend, &relay_client)
 					.await
 			else {
 				continue
 			};
 
-			let parent_hash = parent.hash;
+			let parent_hash = parent_search_result.best_parent_header.hash();
+			let included_header = parent_search_result.included_header;
+			let parent_header = parent_search_result.best_parent_header;
+			// Distance from included block to best parent (unincluded segment length).
+			let unincluded_segment_len =
+				parent_header.number().saturating_sub(*included_header.number());
 
 			// Retrieve the core selector.
 			let (core_selector, claim_queue_offset) =
-				match core_selector(&*para_client, parent.hash, *parent.header.number()) {
+				match core_selector(&*para_client, parent_hash, *parent_header.number()) {
 					Ok(core_selector) => core_selector,
 					Err(err) => {
 						tracing::trace!(
@@ -296,8 +304,6 @@ where
 				continue;
 			};
 
-			let parent_header = parent.header;
-
 			// We mainly call this to inform users at genesis if there is a mismatch with the
 			// on-chain data.
 			collator.collator_service().check_block_status(parent_hash, &parent_header);
@@ -328,7 +334,7 @@ where
 					tracing::debug!(
 						target: crate::LOG_TARGET,
 						?core_index,
-						unincluded_segment_len = parent.depth,
+						?unincluded_segment_len,
 						relay_parent = %relay_parent,
 						relay_parent_num = %relay_parent_header.number(),
 						included_hash = %included_header_hash,
@@ -355,7 +361,7 @@ where
 
 			tracing::debug!(
 				target: crate::LOG_TARGET,
-				unincluded_segment_len = parent.depth,
+				?unincluded_segment_len,
 				relay_parent = %relay_parent,
 				relay_parent_num = %relay_parent_header.number(),
 				relay_parent_offset,
