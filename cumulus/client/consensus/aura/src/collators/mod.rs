@@ -43,15 +43,6 @@ pub mod basic;
 pub mod lookahead;
 pub mod slot_based;
 
-// This is an arbitrary value which is likely guaranteed to exceed any reasonable
-// limit, as it would correspond to 30 non-included blocks.
-//
-// Since we only search for parent blocks which have already been imported,
-// we can guarantee that all imported blocks respect the unincluded segment
-// rules specified by the parachain's runtime and thus will never be too deep. This is just an extra
-// sanity check.
-const PARENT_SEARCH_DEPTH: usize = 30;
-
 // Helper to pre-connect to the backing group we got assigned to and keep the connection
 // open until backing group changes or own slot ends.
 struct BackingGroupConnectionHelper<Client> {
@@ -282,15 +273,14 @@ where
 		.then(|| SlotClaim::unchecked::<P>(author_pub, para_slot, timestamp))
 }
 
-/// Use [`cumulus_client_consensus_common::find_potential_parents`] to find parachain blocks that
-/// we can build on. Once a list of potential parents is retrieved, return the last one of the
-/// longest chain.
+/// Use [`cumulus_client_consensus_common::find_parent_for_building`] to find the best parachain
+/// block to build on.
 async fn find_parent<Block>(
 	relay_parent: RelayHash,
 	para_id: ParaId,
 	para_backend: &impl sc_client_api::Backend<Block>,
 	relay_client: &impl RelayChainInterface,
-) -> Option<(<Block as BlockT>::Header, consensus_common::PotentialParent<Block>)>
+) -> Option<consensus_common::ParentSearchResult<Block>>
 where
 	Block: BlockT,
 {
@@ -301,36 +291,26 @@ where
 			.await
 			.unwrap_or(DEFAULT_SCHEDULING_LOOKAHEAD)
 			.saturating_sub(1) as usize,
-		max_depth: PARENT_SEARCH_DEPTH,
-		ignore_alternative_branches: true,
 	};
 
-	let potential_parents = cumulus_client_consensus_common::find_potential_parents::<Block>(
+	match cumulus_client_consensus_common::find_parent_for_building::<Block>(
 		parent_search_params,
 		para_backend,
 		relay_client,
 	)
-	.await;
-
-	let potential_parents = match potential_parents {
+	.await
+	{
+		Ok(result) => result,
 		Err(e) => {
 			tracing::error!(
 				target: crate::LOG_TARGET,
 				?relay_parent,
 				err = ?e,
-				"Could not fetch potential parents to build upon"
+				"Could not find parent to build upon"
 			);
-
-			return None
+			None
 		},
-		Ok(x) => x,
-	};
-
-	let included_block = potential_parents.iter().find(|x| x.depth == 0)?.header.clone();
-	potential_parents
-		.into_iter()
-		.max_by_key(|a| a.depth)
-		.map(|parent| (included_block, parent))
+	}
 }
 
 #[cfg(test)]
