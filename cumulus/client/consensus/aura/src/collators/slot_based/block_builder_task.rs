@@ -38,7 +38,7 @@ use crate::{
 			relay_chain_data_cache::{RelayChainData, RelayChainDataCache},
 			slot_timer::{SlotInfo, SlotTimer},
 		},
-		RelayParentData,
+		BackingGroupConnectionHelper, RelayParentData,
 	},
 	LOG_TARGET,
 };
@@ -54,7 +54,10 @@ use sp_consensus_aura::AuraApi;
 use sp_core::crypto::Pair;
 use sp_inherents::CreateInherentDataProviders;
 use sp_keystore::KeystorePtr;
-use sp_runtime::traits::{Block as BlockT, Header as HeaderT, Member};
+use sp_runtime::{
+	traits::{Block as BlockT, Header as HeaderT, Member},
+	Saturating,
+};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 /// Parameters for [`run_block_builder`].
@@ -137,7 +140,7 @@ where
 	Proposer: ProposerInterface<Block> + Send + Sync + 'static,
 	CS: CollatorServiceInterface<Block> + Send + Sync + 'static,
 	CHP: consensus_common::ValidationCodeHashProvider<Block::Hash> + Send + 'static,
-	P: Pair,
+	P: Pair + Send + Sync + 'static,
 	P::Public: AppPublic + Member + Codec,
 	P::Signature: TryFrom<Vec<u8>> + Member + Codec,
 {
@@ -183,6 +186,16 @@ where
 
 		let mut relay_chain_data_cache = RelayChainDataCache::new(relay_client.clone(), para_id);
 
+		let mut maybe_connection_helper = relay_client
+			.overseer_handle()
+			.ok()
+			.map(|h| BackingGroupConnectionHelper::new(para_client.clone(), keystore.clone(), h.clone()))
+			.or_else(|| {
+				tracing::warn!(target: LOG_TARGET,
+					"Relay chain interface does not provide overseer handle. Backing group pre-connect is disabled.");
+				None
+			});
+
 		loop {
 			// We wait here until the next slot arrives.
 			if slot_timer.wait_until_next_slot().await.is_err() {
@@ -204,7 +217,7 @@ where
 				continue;
 			};
 
-			let Ok(rp_data) = offset_relay_parent_find_descendants(
+			let Ok(Some(rp_data)) = offset_relay_parent_find_descendants(
 				&relay_client,
 				relay_best_hash,
 				relay_parent_offset,
@@ -224,18 +237,23 @@ where
 
 			let relay_parent = rp_data.relay_parent().hash();
 
-			let Some((included_header, parent)) =
+			let Some(parent_search_result) =
 				crate::collators::find_parent(relay_parent, para_id, &*para_backend, &relay_client)
 					.await
 			else {
 				continue
 			};
 
-			let parent_hash = parent.hash;
+			let parent_hash = parent_search_result.best_parent_header.hash();
+			let included_header = parent_search_result.included_header;
+			let parent_header = parent_search_result.best_parent_header;
+			// Distance from included block to best parent (unincluded segment length).
+			let unincluded_segment_len =
+				parent_header.number().saturating_sub(*included_header.number());
 
 			// Retrieve the core selector.
 			let (core_selector, claim_queue_offset) =
-				match core_selector(&*para_client, parent.hash, *parent.header.number()) {
+				match core_selector(&*para_client, parent_hash, *parent_header.number()) {
 					Ok(core_selector) => core_selector,
 					Err(err) => {
 						tracing::trace!(
@@ -286,8 +304,6 @@ where
 				continue;
 			};
 
-			let parent_header = parent.header;
-
 			// We mainly call this to inform users at genesis if there is a mismatch with the
 			// on-chain data.
 			collator.collator_service().check_block_status(parent_hash, &parent_header);
@@ -318,7 +334,7 @@ where
 					tracing::debug!(
 						target: crate::LOG_TARGET,
 						?core_index,
-						unincluded_segment_len = parent.depth,
+						?unincluded_segment_len,
 						relay_parent = %relay_parent,
 						relay_parent_num = %relay_parent_header.number(),
 						included_hash = %included_header_hash,
@@ -327,6 +343,9 @@ where
 						slot = ?para_slot.slot,
 						"Not building block."
 					);
+					if let Some(ref mut connection_helper) = maybe_connection_helper {
+						connection_helper.update::<Block, P>(para_slot.slot, parent_hash).await;
+					}
 					continue
 				},
 			};
@@ -342,7 +361,7 @@ where
 
 			tracing::debug!(
 				target: crate::LOG_TARGET,
-				unincluded_segment_len = parent.depth,
+				?unincluded_segment_len,
 				relay_parent = %relay_parent,
 				relay_parent_num = %relay_parent_header.number(),
 				relay_parent_offset,
@@ -404,13 +423,33 @@ where
 				validation_data.max_pov_size * 85 / 100
 			} as usize;
 
+			let adjusted_authoring_duration =
+				slot_timer.adjust_authoring_duration(authoring_duration);
+			tracing::debug!(target: crate::LOG_TARGET, duration = ?adjusted_authoring_duration, "Adjusted proposal duration.");
+
+			let Some(adjusted_authoring_duration) = adjusted_authoring_duration else {
+				tracing::debug!(
+					target: crate::LOG_TARGET,
+					?unincluded_segment_len,
+					relay_parent = ?relay_parent,
+					relay_parent_num = %relay_parent_header.number(),
+					included_hash = ?included_header_hash,
+					included_num = %included_header.number(),
+					parent = ?parent_hash,
+					slot = ?para_slot.slot,
+					"Not building block due to insufficient authoring duration."
+				);
+
+				continue;
+			};
+
 			let Ok(Some(candidate)) = collator
 				.build_block_and_import(
 					&parent_header,
 					&slot_claim,
 					None,
 					(parachain_inherent_data, other_inherent_data),
-					authoring_duration,
+					adjusted_authoring_duration,
 					allowed_pov_size,
 				)
 				.await
@@ -476,7 +515,7 @@ async fn offset_relay_parent_find_descendants<RelayClient>(
 	relay_client: &RelayClient,
 	relay_best_block: RelayHash,
 	relay_parent_offset: u32,
-) -> Result<RelayParentData, ()>
+) -> Result<Option<RelayParentData>, ()>
 where
 	RelayClient: RelayChainInterface + Clone + 'static,
 {
@@ -487,7 +526,12 @@ where
 	};
 
 	if relay_parent_offset == 0 {
-		return Ok(RelayParentData::new(relay_header));
+		return Ok(Some(RelayParentData::new(relay_header)));
+	}
+
+	if sc_consensus_babe::contains_epoch_change::<RelayBlock>(&relay_header) {
+		tracing::debug!(target: LOG_TARGET, ?relay_best_block, relay_best_block_number = relay_header.number(), "Relay parent is in previous session.");
+		return Ok(None);
 	}
 
 	let mut required_ancestors: VecDeque<RelayHeader> = Default::default();
@@ -498,6 +542,10 @@ where
 		else {
 			return Err(())
 		};
+		if sc_consensus_babe::contains_epoch_change::<RelayBlock>(&next_header) {
+			tracing::debug!(target: LOG_TARGET, ?relay_best_block, ancestor = %next_header.hash(), ancestor_block_number = next_header.number(), "Ancestor of best block is in previous session.");
+			return Ok(None);
+		}
 		required_ancestors.push_front(next_header.clone());
 		relay_header = next_header;
 	}
@@ -514,7 +562,7 @@ where
 		num_descendants = required_ancestors.len(),
 		"Relay parent descendants."
 	);
-	Ok(RelayParentData::new_with_descendants(relay_parent, required_ancestors.into()))
+	Ok(Some(RelayParentData::new_with_descendants(relay_parent, required_ancestors.into())))
 }
 
 #[cfg(test)]
@@ -539,7 +587,7 @@ mod tests {
 
 		let result = offset_relay_parent_find_descendants(&client, best_hash, 0).await;
 		assert!(result.is_ok());
-		let data = result.unwrap();
+		let data = result.unwrap().unwrap();
 		assert_eq!(data.descendants_len(), 0);
 		assert_eq!(data.relay_parent().hash(), best_hash);
 		assert!(data.into_inherent_descendant_list().is_empty());
@@ -554,7 +602,7 @@ mod tests {
 
 		let result = offset_relay_parent_find_descendants(&client, best_hash, 2).await;
 		assert!(result.is_ok());
-		let data = result.unwrap();
+		let data = result.unwrap().unwrap();
 		assert_eq!(data.descendants_len(), 2);
 		assert_eq!(*data.relay_parent().number(), 98);
 		let descendant_list = data.into_inherent_descendant_list();
@@ -572,7 +620,7 @@ mod tests {
 
 		let result = offset_relay_parent_find_descendants(&client, best_hash, 5).await;
 		assert!(result.is_ok());
-		let data = result.unwrap();
+		let data = result.unwrap().unwrap();
 		assert_eq!(data.descendants_len(), 5);
 		assert_eq!(*data.relay_parent().number(), 95);
 		let descendant_list = data.into_inherent_descendant_list();
@@ -593,6 +641,32 @@ mod tests {
 
 		let result = offset_relay_parent_find_descendants(&client, best_hash, 101).await;
 		assert!(result.is_err());
+	}
+
+	#[derive(PartialEq)]
+	enum HasEpochChange {
+		Yes,
+		No,
+	}
+
+	#[rstest::rstest]
+	#[case::in_best(
+		&[HasEpochChange::No, HasEpochChange::No, HasEpochChange::Yes],
+	)]
+	#[case::in_first_ancestor(
+		&[HasEpochChange::No, HasEpochChange::Yes, HasEpochChange::No],
+	)]
+	#[case::in_second_ancestor(
+		&[HasEpochChange::Yes, HasEpochChange::No, HasEpochChange::No],
+	)]
+	#[tokio::test]
+	async fn offset_returns_none_when_epoch_change_encountered(#[case] flags: &[HasEpochChange]) {
+		let (headers, best_hash) = build_headers_with_epoch_flags(flags);
+		let client = TestRelayClient::new(headers);
+
+		let result = offset_relay_parent_find_descendants(&client, best_hash, 3).await;
+		assert!(result.is_ok());
+		assert!(result.unwrap().is_none());
 	}
 
 	#[derive(Clone)]
@@ -790,5 +864,55 @@ mod tests {
 		}
 
 		(headers, header_hash)
+	}
+
+	/// Build a consecutive set of relay headers whose digest entries optionally carry a BABE
+	/// epoch-change marker, returning the underlying map and the hash of the last header.
+	fn build_headers_with_epoch_flags(
+		flags: &[HasEpochChange],
+	) -> (HashMap<RelayHash, RelayHeader>, RelayHash) {
+		let mut headers = HashMap::new();
+		let mut parent_hash = RelayHash::default();
+		let mut last_hash = RelayHash::default();
+
+		for (index, has_epoch_change) in flags.iter().enumerate() {
+			let digest = if *has_epoch_change == HasEpochChange::Yes {
+				babe_epoch_change_digest()
+			} else {
+				Default::default()
+			};
+
+			let header = RelayHeader {
+				parent_hash,
+				number: (index as u32 + 1),
+				state_root: Default::default(),
+				extrinsics_root: Default::default(),
+				digest,
+			};
+
+			let hash = header.hash();
+			headers.insert(hash, header);
+			parent_hash = hash;
+			last_hash = hash;
+		}
+
+		(headers, last_hash)
+	}
+
+	/// Create a digest containing a single BABE `NextEpochData` item for use in tests.
+	fn babe_epoch_change_digest() -> sp_runtime::generic::Digest {
+		use codec::Encode;
+		use sc_consensus_babe::{
+			AuthorityId, ConsensusLog as BabeConsensusLog, NextEpochDescriptor, BABE_ENGINE_ID,
+		};
+		use sp_core::sr25519;
+
+		let mut digest = sp_runtime::generic::Digest::default();
+		let authority_id = AuthorityId::from(sr25519::Public::from_raw([1u8; 32]));
+		let next_epoch =
+			NextEpochDescriptor { authorities: vec![(authority_id, 1u64)], randomness: [0u8; 32] };
+		let log = BabeConsensusLog::NextEpochData(next_epoch);
+		digest.push(sp_runtime::generic::DigestItem::Consensus(BABE_ENGINE_ID, log.encode()));
+		digest
 	}
 }

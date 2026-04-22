@@ -29,8 +29,8 @@
 //!
 //! 1. Awaits the next production signal from the internal timer
 //! 2. Retrieves the current best relay chain block and identifies a valid parent block (see
-//!    [find_potential_parents][cumulus_client_consensus_common::find_potential_parents] for parent
-//!    selection criteria)
+//!    [find_parent_for_building][cumulus_client_consensus_common::find_parent_for_building] for
+//!    parent selection criteria)
 //! 3. Validates that:
 //!    - The parachain has an assigned core on the relay chain
 //!    - No block has been previously built on the target core
@@ -175,10 +175,10 @@ pub fn run<Block, P, BI, CIDP, Client, Backend, RClient, CHP, Proposer, CS, Spaw
 	Proposer: ProposerInterface<Block> + Send + Sync + 'static,
 	CS: CollatorServiceInterface<Block> + Send + Sync + Clone + 'static,
 	CHP: consensus_common::ValidationCodeHashProvider<Block::Hash> + Send + 'static,
-	P: Pair + 'static,
+	P: Pair + Send + Sync + 'static,
 	P::Public: AppPublic + Member + Codec,
 	P::Signature: TryFrom<Vec<u8>> + Member + Codec,
-	Spawner: SpawnNamed,
+	Spawner: SpawnNamed + Clone + 'static,
 {
 	let Params {
 		create_inherent_data_providers,

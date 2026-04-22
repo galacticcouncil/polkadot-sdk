@@ -26,8 +26,8 @@ use codec::Codec;
 use cumulus_client_consensus_common::{self as consensus_common, ParentSearchParams};
 use cumulus_primitives_aura::{AuraUnincludedSegmentApi, Slot};
 use cumulus_primitives_core::{relay_chain::Header as RelayHeader, BlockT, ClaimQueueOffset};
-use cumulus_relay_chain_interface::RelayChainInterface;
-use polkadot_node_subsystem::messages::RuntimeApiRequest;
+use cumulus_relay_chain_interface::{OverseerHandle, RelayChainInterface};
+use polkadot_node_subsystem::messages::{CollatorProtocolMessage, RuntimeApiRequest};
 use polkadot_node_subsystem_util::runtime::ClaimQueueSnapshot;
 use polkadot_primitives::{
 	CoreIndex, Hash as RelayHash, Id as ParaId, OccupiedCoreAssumption, ValidationCodeHash,
@@ -43,14 +43,68 @@ pub mod basic;
 pub mod lookahead;
 pub mod slot_based;
 
-// This is an arbitrary value which is likely guaranteed to exceed any reasonable
-// limit, as it would correspond to 30 non-included blocks.
-//
-// Since we only search for parent blocks which have already been imported,
-// we can guarantee that all imported blocks respect the unincluded segment
-// rules specified by the parachain's runtime and thus will never be too deep. This is just an extra
-// sanity check.
-const PARENT_SEARCH_DEPTH: usize = 30;
+// Helper to pre-connect to the backing group we got assigned to and keep the connection
+// open until backing group changes or own slot ends.
+struct BackingGroupConnectionHelper<Client> {
+	client: std::sync::Arc<Client>,
+	keystore: sp_keystore::KeystorePtr,
+	overseer_handle: OverseerHandle,
+	our_slot: Option<Slot>,
+}
+
+impl<Client> BackingGroupConnectionHelper<Client> {
+	pub fn new(
+		client: std::sync::Arc<Client>,
+		keystore: sp_keystore::KeystorePtr,
+		overseer_handle: OverseerHandle,
+	) -> Self {
+		Self { client, keystore, overseer_handle, our_slot: None }
+	}
+
+	async fn send_subsystem_message(&mut self, message: CollatorProtocolMessage) {
+		self.overseer_handle.send_msg(message, "BackingGroupConnectionHelper").await;
+	}
+
+	/// Update the current slot and initiate connections to backing groups if needed.
+	pub async fn update<Block, P>(&mut self, current_slot: Slot, best_block: Block::Hash)
+	where
+		Block: sp_runtime::traits::Block,
+		Client:
+			sc_client_api::HeaderBackend<Block> + Send + Sync + ProvideRuntimeApi<Block> + 'static,
+		Client::Api: AuraApi<Block, P::Public>,
+		P: sp_core::Pair + Send + Sync,
+		P::Public: Codec,
+	{
+		if Some(current_slot) <= self.our_slot {
+			// Current slot or next slot is ours.
+			// We already sent pre-connect message, no need to proceed further.
+			return
+		}
+
+		let Some(authorities) = self.client.runtime_api().authorities(best_block).ok() else {
+			return
+		};
+
+		let next_slot = current_slot + 1;
+		let next_slot_is_ours =
+			aura_internal::claim_slot::<P>(next_slot, &authorities, &self.keystore)
+				.await
+				.is_some();
+
+		if next_slot_is_ours {
+			// Next slot is ours, send connect message.
+			tracing::debug!(target: crate::LOG_TARGET, "Our slot {} is next, connecting to backing groups", next_slot);
+			self.send_subsystem_message(CollatorProtocolMessage::ConnectToBackingGroups)
+				.await;
+			self.our_slot = Some(next_slot);
+		} else if self.our_slot.take().is_some() {
+			// Next slot is not ours, send disconnect only if we had a slot before.
+			tracing::debug!(target: crate::LOG_TARGET, "Current slot = {}, disconnecting from backing groups", current_slot);
+			self.send_subsystem_message(CollatorProtocolMessage::DisconnectFromBackingGroups)
+				.await;
+		}
+	}
+}
 
 /// Check the `local_validation_code_hash` against the validation code hash in the relay chain
 /// state.
@@ -219,15 +273,14 @@ where
 		.then(|| SlotClaim::unchecked::<P>(author_pub, para_slot, timestamp))
 }
 
-/// Use [`cumulus_client_consensus_common::find_potential_parents`] to find parachain blocks that
-/// we can build on. Once a list of potential parents is retrieved, return the last one of the
-/// longest chain.
+/// Use [`cumulus_client_consensus_common::find_parent_for_building`] to find the best parachain
+/// block to build on.
 async fn find_parent<Block>(
 	relay_parent: RelayHash,
 	para_id: ParaId,
 	para_backend: &impl sc_client_api::Backend<Block>,
 	relay_client: &impl RelayChainInterface,
-) -> Option<(<Block as BlockT>::Header, consensus_common::PotentialParent<Block>)>
+) -> Option<consensus_common::ParentSearchResult<Block>>
 where
 	Block: BlockT,
 {
@@ -238,41 +291,32 @@ where
 			.await
 			.unwrap_or(DEFAULT_SCHEDULING_LOOKAHEAD)
 			.saturating_sub(1) as usize,
-		max_depth: PARENT_SEARCH_DEPTH,
-		ignore_alternative_branches: true,
 	};
 
-	let potential_parents = cumulus_client_consensus_common::find_potential_parents::<Block>(
+	match cumulus_client_consensus_common::find_parent_for_building::<Block>(
 		parent_search_params,
 		para_backend,
 		relay_client,
 	)
-	.await;
-
-	let potential_parents = match potential_parents {
+	.await
+	{
+		Ok(result) => result,
 		Err(e) => {
 			tracing::error!(
 				target: crate::LOG_TARGET,
 				?relay_parent,
 				err = ?e,
-				"Could not fetch potential parents to build upon"
+				"Could not find parent to build upon"
 			);
-
-			return None
+			None
 		},
-		Ok(x) => x,
-	};
-
-	let included_block = potential_parents.iter().find(|x| x.depth == 0)?.header.clone();
-	potential_parents
-		.into_iter()
-		.max_by_key(|a| a.depth)
-		.map(|parent| (included_block, parent))
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::collators::can_build_upon;
+	use super::*;
+	use crate::collators::{can_build_upon, BackingGroupConnectionHelper};
 	use codec::Encode;
 	use cumulus_primitives_aura::Slot;
 	use cumulus_primitives_core::BlockT;
@@ -283,12 +327,14 @@ mod tests {
 		TestClientBuilderExt,
 	};
 	use cumulus_test_relay_sproof_builder::RelayStateSproofBuilder;
+	use futures::StreamExt;
+	use polkadot_overseer::{Event, Handle};
 	use polkadot_primitives::HeadData;
 	use sc_consensus::{BlockImport, BlockImportParams, ForkChoiceStrategy};
 	use sp_consensus::BlockOrigin;
 	use sp_keystore::{Keystore, KeystorePtr};
 	use sp_timestamp::Timestamp;
-	use std::sync::Arc;
+	use std::sync::{Arc, Mutex};
 
 	async fn import_block<I: BlockImport<Block>>(
 		importer: &I,
@@ -325,9 +371,9 @@ mod tests {
 		block
 	}
 
-	fn set_up_components() -> (Arc<Client>, KeystorePtr) {
+	fn set_up_components(num_authorities: usize) -> (Arc<Client>, KeystorePtr) {
 		let keystore = Arc::new(sp_keystore::testing::MemoryKeystore::new()) as Arc<_>;
-		for key in sp_keyring::Sr25519Keyring::iter() {
+		for key in sp_keyring::Sr25519Keyring::iter().take(num_authorities) {
 			Keystore::sr25519_generate_new(
 				&*keystore,
 				sp_application_crypto::key_types::AURA,
@@ -345,7 +391,7 @@ mod tests {
 	/// we are ensuring on the node side that we are are always able to build on the included block.
 	#[tokio::test]
 	async fn test_can_build_upon() {
-		let (client, keystore) = set_up_components();
+		let (client, keystore) = set_up_components(6);
 
 		let genesis_hash = client.chain_info().genesis_hash;
 		let mut last_hash = genesis_hash;
@@ -380,6 +426,222 @@ mod tests {
 		)
 		.await;
 		assert!(result.is_some());
+	}
+
+	/// Helper to create a mock overseer handle and message recorder
+	fn create_overseer_handle() -> (OverseerHandle, Arc<Mutex<Vec<CollatorProtocolMessage>>>) {
+		let messages = Arc::new(Mutex::new(Vec::new()));
+		let messages_clone = messages.clone();
+
+		let (tx, mut rx) = polkadot_node_subsystem_util::metered::channel(100);
+
+		// Spawn a task to receive and record overseer messages
+		tokio::spawn(async move {
+			while let Some(event) = rx.next().await {
+				if let Event::MsgToSubsystem { msg, .. } = event {
+					if let polkadot_node_subsystem::AllMessages::CollatorProtocol(cp_msg) = msg {
+						messages_clone.lock().unwrap().push(cp_msg);
+					}
+				}
+			}
+		});
+
+		(Handle::new(tx), messages)
+	}
+
+	#[tokio::test]
+	async fn preconnect_when_next_slot_is_ours() {
+		let (client, keystore) = set_up_components(6);
+		let genesis_hash = client.chain_info().genesis_hash;
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		// Update with slot 0, next slot (1) should be ours
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(0), genesis_hash)
+			.await;
+
+		// Give time for message to be processed
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+		let messages = messages_recorder.lock().unwrap();
+		assert_eq!(messages.len(), 1);
+		assert!(matches!(messages[0], CollatorProtocolMessage::ConnectToBackingGroups));
+		assert_eq!(helper.our_slot, Some(Slot::from(1)));
+	}
+
+	#[tokio::test]
+	async fn preconnect_no_duplicate_connect_message() {
+		let (client, keystore) = set_up_components(6);
+		let genesis_hash = client.chain_info().genesis_hash;
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		// Update with slot 0, next slot (1) is ours
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(0), genesis_hash)
+			.await;
+
+		// Give time for message to be processed
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		assert_eq!(messages_recorder.lock().unwrap().len(), 1);
+		messages_recorder.lock().unwrap().clear();
+
+		// Update with slot 0 again - should not send another message
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(0), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		assert_eq!(messages_recorder.lock().unwrap().len(), 0);
+
+		// Update with slot 1 (our slot) - should not send another message
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(1), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		assert_eq!(messages_recorder.lock().unwrap().len(), 0);
+	}
+
+	#[tokio::test]
+	async fn preconnect_disconnect_when_slot_passes() {
+		let (client, keystore) = set_up_components(1);
+		let genesis_hash = client.chain_info().genesis_hash;
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		// Slot 0 -> Alice, Slot 1 -> Bob, Slot 2 -> Charlie, Slot 3 -> Dave, Slot 4 -> Eve,
+		// Slot 5 -> Ferdie, Slot 6 -> Alice
+
+		// Update with slot 5, next slot (6) is ours -> should connect
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(5), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		assert_eq!(helper.our_slot, Some(Slot::from(6)));
+		messages_recorder.lock().unwrap().clear();
+
+		// Update with slot 8, next slot (9) is Charlie's -> should disconnect
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(8), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+		{
+			let messages = messages_recorder.lock().unwrap();
+			assert_eq!(messages.len(), 1, "Expected exactly one disconnect message");
+			assert!(matches!(messages[0], CollatorProtocolMessage::DisconnectFromBackingGroups));
+			assert_eq!(helper.our_slot, None);
+		}
+
+		messages_recorder.lock().unwrap().clear();
+
+		// Update again with slot 8, next slot (9) is Charlie's -> should not send another
+		// disconnect message
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(8), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+		let messages = messages_recorder.lock().unwrap();
+		assert_eq!(messages.len(), 0, "Expected no messages");
+		assert_eq!(helper.our_slot, None);
+	}
+
+	#[tokio::test]
+	async fn preconnect_no_disconnect_without_previous_connection() {
+		let (client, keystore) = set_up_components(1);
+		let genesis_hash = client.chain_info().genesis_hash;
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		// Slot 0 -> Alice, Slot 1 -> Bob, Slot 2 -> Charlie, Slot 3 -> Dave, Slot 4 -> Eve,
+		// Slot 5 -> Ferdie
+
+		// Update with slot 1 (Bob's slot), next slot (2) is Charlie's
+		// Since we never connected before (our_slot is None), we should not send disconnect
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(1), genesis_hash)
+			.await;
+
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		// Should not send any message since we never connected
+		assert_eq!(messages_recorder.lock().unwrap().len(), 0);
+		assert_eq!(helper.our_slot, None);
+	}
+
+	#[tokio::test]
+	async fn preconnect_multiple_cycles() {
+		let (client, keystore) = set_up_components(1);
+		let genesis_hash = client.chain_info().genesis_hash;
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		// Slot 0 -> Alice, Slot 1 -> Bob, Slot 2 -> Charlie, Slot 3 -> Dave, Slot 4 -> Eve,
+		// Slot 5 -> Ferdie, Slot 6 -> Alice, Slot 7 -> Bob, ...
+
+		// Cycle 1: Connect at slot 5, next slot (6) is ours
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(5), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		{
+			let messages = messages_recorder.lock().unwrap();
+			assert_eq!(messages.len(), 1);
+			assert!(matches!(messages[0], CollatorProtocolMessage::ConnectToBackingGroups));
+		}
+		assert_eq!(helper.our_slot, Some(Slot::from(6)));
+		messages_recorder.lock().unwrap().clear();
+
+		// Cycle 1: Disconnect at slot 7, next slot (8) is Charlie's
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(7), genesis_hash)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		{
+			let messages = messages_recorder.lock().unwrap();
+			assert_eq!(messages.len(), 1);
+			assert!(matches!(messages[0], CollatorProtocolMessage::DisconnectFromBackingGroups));
+		}
+		assert_eq!(helper.our_slot, None);
+		messages_recorder.lock().unwrap().clear();
+
+		// Cycle 2: Connect again at slot 11, next slot (12) is ours
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(
+				Slot::from(11),
+				genesis_hash,
+			)
+			.await;
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		{
+			let messages = messages_recorder.lock().unwrap();
+			assert_eq!(messages.len(), 1);
+			assert!(matches!(messages[0], CollatorProtocolMessage::ConnectToBackingGroups));
+		}
+		assert_eq!(helper.our_slot, Some(Slot::from(12)));
+	}
+
+	#[tokio::test]
+	async fn preconnect_handles_runtime_api_error() {
+		let keystore = Arc::new(sp_keystore::testing::MemoryKeystore::new()) as Arc<_>;
+		let client = Arc::new(TestClientBuilder::new().build());
+		let (overseer_handle, messages_recorder) = create_overseer_handle();
+
+		let mut helper = BackingGroupConnectionHelper::new(client, keystore, overseer_handle);
+
+		let invalid_hash = Hash::default();
+		helper
+			.update::<Block, sp_consensus_aura::sr25519::AuthorityPair>(Slot::from(0), invalid_hash)
+			.await;
+
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+		// Should not send any message if runtime API fails
+		assert_eq!(messages_recorder.lock().unwrap().len(), 0);
 	}
 }
 
