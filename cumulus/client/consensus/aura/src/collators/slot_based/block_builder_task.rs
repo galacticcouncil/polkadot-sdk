@@ -617,7 +617,7 @@ where
 	}
 
 	if sc_consensus_babe::contains_epoch_change::<RelayBlock>(&relay_header) {
-		tracing::debug!(target: LOG_TARGET, ?relay_best_block, relay_best_block_number = relay_header.number(), "Relay parent is in previous session.");
+		tracing::debug!(target: LOG_TARGET, relay_parent = %relay_header.hash(), relay_parent_number = relay_header.number(), "Relay parent is in previous session.");
 		return Ok(None);
 	}
 
@@ -630,7 +630,7 @@ where
 			return Err(())
 		};
 		if sc_consensus_babe::contains_epoch_change::<RelayBlock>(&next_header) {
-			tracing::debug!(target: LOG_TARGET, ?relay_best_block, ancestor = %next_header.hash(), ancestor_block_number = next_header.number(), "Ancestor of best block is in previous session.");
+			tracing::debug!(target: LOG_TARGET, ancestor = %next_header.hash(), ancestor_block_number = next_header.number(), "Ancestor of best block is in previous session.");
 			return Ok(None);
 		}
 		required_ancestors.push_front(next_header.clone());
