@@ -376,10 +376,11 @@ where
 			},
 		) {
 			Ok((imbalance, remaining)) => {
-				Self::deposit_event(Event::Slashed {
-					who: who.clone(),
-					amount: value.saturating_sub(remaining),
-				});
+				let actual = value.saturating_sub(remaining);
+				Self::deposit_event(Event::Slashed { who: who.clone(), amount: actual });
+				if !actual.is_zero() {
+					<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_burn(who, actual);
+				}
 				(imbalance, remaining)
 			},
 			Err(_) => (Self::NegativeImbalance::zero(), value),
@@ -398,7 +399,7 @@ where
 			return Ok(PositiveImbalance::zero())
 		}
 
-		Self::try_mutate_account_handling_dust(
+		let result = Self::try_mutate_account_handling_dust(
 			who,
 			|account, is_new| -> Result<Self::PositiveImbalance, DispatchError> {
 				ensure!(!is_new, Error::<T, I>::DeadAccount);
@@ -406,7 +407,11 @@ where
 				Self::deposit_event(Event::Deposit { who: who.clone(), amount: value });
 				Ok(PositiveImbalance::new(value))
 			},
-		)
+		);
+		if result.is_ok() {
+			<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_mint(who, value);
+		}
+		result
 	}
 
 	/// Deposit some `value` into the free balance of `who`, possibly creating a new account.
@@ -423,7 +428,7 @@ where
 			return Self::PositiveImbalance::zero()
 		}
 
-		Self::try_mutate_account_handling_dust(
+		let imbalance = Self::try_mutate_account_handling_dust(
 			who,
 			|account, is_new| -> Result<Self::PositiveImbalance, DispatchError> {
 				let ed = T::ExistentialDeposit::get();
@@ -440,7 +445,12 @@ where
 				Ok(PositiveImbalance::new(value))
 			},
 		)
-		.unwrap_or_else(|_| Self::PositiveImbalance::zero())
+		.unwrap_or_else(|_| Self::PositiveImbalance::zero());
+		let actual = imbalance.peek();
+		if !actual.is_zero() {
+			<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_mint(who, actual);
+		}
+		imbalance
 	}
 
 	/// Withdraw some free balance from an account, respecting existence requirements.
@@ -456,7 +466,7 @@ where
 			return Ok(NegativeImbalance::zero())
 		}
 
-		Self::try_mutate_account_handling_dust(
+		let result = Self::try_mutate_account_handling_dust(
 			who,
 			|account, _| -> Result<Self::NegativeImbalance, DispatchError> {
 				let new_free_account =
@@ -475,7 +485,11 @@ where
 				Self::deposit_event(Event::Withdraw { who: who.clone(), amount: value });
 				Ok(NegativeImbalance::new(value))
 			},
-		)
+		);
+		if result.is_ok() {
+			<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_burn(who, value);
+		}
+		result
 	}
 
 	/// Force the new free balance of a target account `who` to some new value `balance`.
@@ -616,10 +630,11 @@ where
 			(NegativeImbalance::new(actual), value.saturating_sub(actual))
 		}) {
 			Ok((imbalance, not_slashed)) => {
-				Self::deposit_event(Event::Slashed {
-					who: who.clone(),
-					amount: value.saturating_sub(not_slashed),
-				});
+				let actual = value.saturating_sub(not_slashed);
+				Self::deposit_event(Event::Slashed { who: who.clone(), amount: actual });
+				if !actual.is_zero() {
+					<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_slash_reserved(who, actual);
+				}
 				(imbalance, not_slashed)
 			},
 			Err(_) => (Self::NegativeImbalance::zero(), value),

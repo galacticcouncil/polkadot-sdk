@@ -159,6 +159,9 @@ pub trait BalancesHooks<AccountId, Balance> {
 	fn on_dust_lost(_who: &AccountId, _amount: Balance) {}
 	fn on_reserve(_who: &AccountId, _amount: Balance) {}
 	fn on_unreserve(_who: &AccountId, _amount: Balance) {}
+	/// Burns from the reserved bucket (semantically distinct from `on_burn`,
+	/// which burns from free balance).
+	fn on_slash_reserved(_who: &AccountId, _amount: Balance) {}
 	/// Fires on `repatriate_reserved` only when `slashed != beneficiary`.
 	fn on_repatriate(
 		_slashed: &AccountId,

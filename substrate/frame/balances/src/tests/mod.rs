@@ -120,6 +120,7 @@ parameter_types! {
 	pub static OnReserveCalls: u32 = 0;
 	pub static OnUnreserveCalls: u32 = 0;
 	pub static OnRepatriateCalls: u32 = 0;
+	pub static OnSlashReservedCalls: u32 = 0;
 }
 
 pub struct TestHooks;
@@ -144,6 +145,9 @@ impl crate::BalancesHooks<u64, u64> for TestHooks {
 	}
 	fn on_repatriate(_: &u64, _: &u64, _: u64, _: frame_support::traits::tokens::BalanceStatus) {
 		OnRepatriateCalls::set(OnRepatriateCalls::get() + 1);
+	}
+	fn on_slash_reserved(_: &u64, _: u64) {
+		OnSlashReservedCalls::set(OnSlashReservedCalls::get() + 1);
 	}
 }
 

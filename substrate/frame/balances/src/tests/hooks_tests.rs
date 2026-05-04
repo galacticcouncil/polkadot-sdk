@@ -19,14 +19,14 @@
 
 use crate::tests::{
 	Balances, ExtBuilder, OnBurnCalls, OnDustLostCalls, OnMintCalls, OnRepatriateCalls,
-	OnReserveCalls, OnTransferCalls, OnUnreserveCalls, RawOrigin,
+	OnReserveCalls, OnSlashReservedCalls, OnTransferCalls, OnUnreserveCalls, RawOrigin,
 };
 use frame_support::{
 	assert_ok,
 	traits::{
 		fungible::Mutate,
 		tokens::{BalanceStatus, Fortitude, Precision, Preservation},
-		Currency, ReservableCurrency,
+		Currency, Imbalance, ReservableCurrency, WithdrawReasons,
 	},
 };
 
@@ -123,6 +123,26 @@ fn on_unreserve_hook_fires_with_actual_unreserved_amount() {
 }
 
 #[test]
+fn slash_reserved_fires_on_slash_reserved_hook() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
+		OnSlashReservedCalls::set(0);
+
+		let (imbalance, remaining) = <Balances as ReservableCurrency<_>>::slash_reserved(&1, 100);
+		// account had 5 reserved, asked to slash 100 — best-effort slashes 5
+		assert_eq!(imbalance.peek(), 5);
+		assert_eq!(remaining, 95);
+		assert_eq!(OnSlashReservedCalls::get(), 1);
+
+		// slash_reserved(0) is a no-op
+		let (imbalance, remaining) = <Balances as ReservableCurrency<_>>::slash_reserved(&1, 0);
+		assert_eq!(imbalance.peek(), 0);
+		assert_eq!(remaining, 0);
+		assert_eq!(OnSlashReservedCalls::get(), 1);
+	});
+}
+
+#[test]
 fn on_repatriate_hook_fires_when_slashed_differs_from_beneficiary() {
 	ExtBuilder::default().monied(true).build_and_execute_with(|| {
 		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
@@ -144,6 +164,91 @@ fn on_repatriate_hook_fires_when_slashed_differs_from_beneficiary() {
 			BalanceStatus::Free,
 		));
 		assert_eq!(OnRepatriateCalls::get(), 1);
+	});
+}
+
+// ----------------------------------------------------------------------
+// Legacy Currency-trait hook coverage. Many runtime paths still go through
+// the `Currency` interface (notably the native fee path:
+// pallet-transaction-payment → BasicCurrencyAdapter → Currency::withdraw),
+// so without hook calls in those impls the on_burn / on_mint counters never
+// move and erc20-style indexers see zero Transfer logs for fees.
+// ----------------------------------------------------------------------
+
+#[test]
+fn currency_withdraw_fires_on_burn_hook() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		OnBurnCalls::set(0);
+		// Account 1 starts with 10 (from `monied(true)`).
+		let imbalance = <Balances as Currency<_>>::withdraw(
+			&1,
+			3,
+			WithdrawReasons::TRANSFER,
+			frame_support::traits::ExistenceRequirement::AllowDeath,
+		)
+		.expect("withdraw must succeed");
+		assert_eq!(imbalance.peek(), 3);
+		assert_eq!(OnBurnCalls::get(), 1);
+
+		// withdraw(0) is a no-op and must NOT fire
+		let imbalance = <Balances as Currency<_>>::withdraw(
+			&1,
+			0,
+			WithdrawReasons::TRANSFER,
+			frame_support::traits::ExistenceRequirement::AllowDeath,
+		)
+		.expect("zero withdraw must succeed");
+		assert_eq!(imbalance.peek(), 0);
+		assert_eq!(OnBurnCalls::get(), 1);
+	});
+}
+
+#[test]
+fn currency_deposit_creating_fires_on_mint_hook() {
+	ExtBuilder::default().build_and_execute_with(|| {
+		OnMintCalls::set(0);
+		let pos = <Balances as Currency<_>>::deposit_creating(&42, 1_000);
+		assert_eq!(pos.peek(), 1_000);
+		assert_eq!(OnMintCalls::get(), 1);
+
+		// deposit_creating(0) is a no-op and must NOT fire
+		let pos = <Balances as Currency<_>>::deposit_creating(&42, 0);
+		assert_eq!(pos.peek(), 0);
+		assert_eq!(OnMintCalls::get(), 1);
+	});
+}
+
+#[test]
+fn currency_deposit_into_existing_fires_on_mint_hook() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		OnMintCalls::set(0);
+		let pos = <Balances as Currency<_>>::deposit_into_existing(&1, 7).expect("must succeed");
+		assert_eq!(pos.peek(), 7);
+		assert_eq!(OnMintCalls::get(), 1);
+
+		// zero is a no-op and must NOT fire
+		let pos = <Balances as Currency<_>>::deposit_into_existing(&1, 0).expect("must succeed");
+		assert_eq!(pos.peek(), 0);
+		assert_eq!(OnMintCalls::get(), 1);
+	});
+}
+
+#[test]
+fn currency_slash_fires_on_burn_hook_with_actual_slashed_amount() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		OnBurnCalls::set(0);
+		// account 1 has 10
+		let (imbalance, remaining) = <Balances as Currency<_>>::slash(&1, 1_000);
+		// best-effort slashing: 10 actually slashed, 990 remaining
+		assert_eq!(imbalance.peek(), 10);
+		assert_eq!(remaining, 990);
+		assert_eq!(OnBurnCalls::get(), 1);
+
+		// slash(0) is a no-op and must NOT fire
+		let (imbalance, remaining) = <Balances as Currency<_>>::slash(&1, 0);
+		assert_eq!(imbalance.peek(), 0);
+		assert_eq!(remaining, 0);
+		assert_eq!(OnBurnCalls::get(), 1);
 	});
 }
 
