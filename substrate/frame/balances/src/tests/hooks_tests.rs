@@ -18,14 +18,15 @@
 #![cfg(test)]
 
 use crate::tests::{
-	Balances, ExtBuilder, OnBurnCalls, OnDustLostCalls, OnMintCalls, OnTransferCalls, RawOrigin,
+	Balances, ExtBuilder, OnBurnCalls, OnDustLostCalls, OnMintCalls, OnReserveCalls,
+	OnTransferCalls, OnUnreserveCalls, RawOrigin,
 };
 use frame_support::{
 	assert_ok,
 	traits::{
 		fungible::Mutate,
 		tokens::{Fortitude, Precision, Preservation},
-		Currency,
+		Currency, ReservableCurrency,
 	},
 };
 
@@ -77,5 +78,46 @@ fn on_dust_lost_hook_fires_when_account_dusts() {
 		// Slash 1 of 100 leaves 99 which is below ED (100); the residue is dust.
 		Balances::slash(&1, 1);
 		assert_eq!(OnDustLostCalls::get(), 1);
+	});
+}
+
+#[test]
+fn on_reserve_hook_fires_on_successful_reserve() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		OnReserveCalls::set(0);
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
+		assert_eq!(OnReserveCalls::get(), 1);
+
+		// reserve(0) is a no-op and must NOT fire
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 0));
+		assert_eq!(OnReserveCalls::get(), 1);
+	});
+}
+
+#[test]
+fn on_reserve_hook_does_not_fire_when_reserve_fails() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		OnReserveCalls::set(0);
+		// account 1 has 10; asking 1_000_000 must fail with InsufficientBalance
+		// and the hook must NOT fire
+		assert!(<Balances as ReservableCurrency<_>>::reserve(&1, 1_000_000).is_err());
+		assert_eq!(OnReserveCalls::get(), 0);
+	});
+}
+
+#[test]
+fn on_unreserve_hook_fires_with_actual_unreserved_amount() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
+		OnUnreserveCalls::set(0);
+
+		// asking to unreserve more than reserved — only 5 actually unreserved.
+		let remaining = <Balances as ReservableCurrency<_>>::unreserve(&1, 1_000);
+		assert_eq!(remaining, 995, "remaining = requested - actual_unreserved");
+		assert_eq!(OnUnreserveCalls::get(), 1);
+
+		// unreserve(0) is a no-op and must NOT fire
+		let _ = <Balances as ReservableCurrency<_>>::unreserve(&1, 0);
+		assert_eq!(OnUnreserveCalls::get(), 1);
 	});
 }

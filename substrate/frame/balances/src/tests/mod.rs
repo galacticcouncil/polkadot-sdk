@@ -117,6 +117,8 @@ parameter_types! {
 	pub static OnMintCalls: u32 = 0;
 	pub static OnBurnCalls: u32 = 0;
 	pub static OnDustLostCalls: u32 = 0;
+	pub static OnReserveCalls: u32 = 0;
+	pub static OnUnreserveCalls: u32 = 0;
 }
 
 pub struct TestHooks;
@@ -132,6 +134,12 @@ impl crate::BalancesHooks<u64, u64> for TestHooks {
 	}
 	fn on_dust_lost(_: &u64, _: u64) {
 		OnDustLostCalls::set(OnDustLostCalls::get() + 1);
+	}
+	fn on_reserve(_: &u64, _: u64) {
+		OnReserveCalls::set(OnReserveCalls::get() + 1);
+	}
+	fn on_unreserve(_: &u64, _: u64) {
+		OnUnreserveCalls::set(OnUnreserveCalls::get() + 1);
 	}
 }
 

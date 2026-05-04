@@ -157,6 +157,8 @@ pub trait BalancesHooks<AccountId, Balance> {
 	fn on_mint(_who: &AccountId, _amount: Balance) {}
 	fn on_burn(_who: &AccountId, _amount: Balance) {}
 	fn on_dust_lost(_who: &AccountId, _amount: Balance) {}
+	fn on_reserve(_who: &AccountId, _amount: Balance) {}
+	fn on_unreserve(_who: &AccountId, _amount: Balance) {}
 }
 
 impl<AccountId, Balance> BalancesHooks<AccountId, Balance> for () {}

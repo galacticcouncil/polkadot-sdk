@@ -551,6 +551,7 @@ where
 		})?;
 
 		Self::deposit_event(Event::Reserved { who: who.clone(), amount: value });
+		<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_reserve(who, value);
 		Ok(())
 	}
 
@@ -585,6 +586,7 @@ where
 		};
 
 		Self::deposit_event(Event::Unreserved { who: who.clone(), amount: actual });
+		<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_unreserve(who, actual);
 		value - actual
 	}
 
