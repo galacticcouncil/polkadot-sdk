@@ -191,9 +191,11 @@ impl<T: Config<I>, I: 'static> fungible::Unbalanced<T::AccountId> for Pallet<T, 
 impl<T: Config<I>, I: 'static> fungible::Mutate<T::AccountId> for Pallet<T, I> {
 	fn done_mint_into(who: &T::AccountId, amount: Self::Balance) {
 		Self::deposit_event(Event::<T, I>::Minted { who: who.clone(), amount });
+		<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_mint(who, amount);
 	}
 	fn done_burn_from(who: &T::AccountId, amount: Self::Balance) {
 		Self::deposit_event(Event::<T, I>::Burned { who: who.clone(), amount });
+		<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_burn(who, amount);
 	}
 	fn done_shelve(who: &T::AccountId, amount: Self::Balance) {
 		Self::deposit_event(Event::<T, I>::Suspended { who: who.clone(), amount });
@@ -207,6 +209,9 @@ impl<T: Config<I>, I: 'static> fungible::Mutate<T::AccountId> for Pallet<T, I> {
 			to: dest.clone(),
 			amount,
 		});
+		<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_transfer(
+			source, dest, amount,
+		);
 	}
 }
 

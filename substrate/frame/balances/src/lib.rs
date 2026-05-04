@@ -152,6 +152,15 @@ pub mod weights;
 
 extern crate alloc;
 
+pub trait BalancesHooks<AccountId, Balance> {
+	fn on_transfer(_from: &AccountId, _to: &AccountId, _amount: Balance) {}
+	fn on_mint(_who: &AccountId, _amount: Balance) {}
+	fn on_burn(_who: &AccountId, _amount: Balance) {}
+	fn on_dust_lost(_who: &AccountId, _amount: Balance) {}
+}
+
+impl<AccountId, Balance> BalancesHooks<AccountId, Balance> for () {}
+
 use alloc::{
 	format,
 	string::{String, ToString},
@@ -245,6 +254,7 @@ pub mod pallet {
 
 			type WeightInfo = ();
 			type DoneSlashHandler = ();
+			type RuntimeHooks = ();
 		}
 	}
 
@@ -333,6 +343,10 @@ pub mod pallet {
 			Self::AccountId,
 			Self::Balance,
 		>;
+
+		/// Hooks fired on transfer and dust-loss events.
+		#[pallet::no_default_bounds]
+		type RuntimeHooks: BalancesHooks<Self::AccountId, Self::Balance>;
 	}
 
 	/// The in-code storage version.
@@ -1117,6 +1131,9 @@ pub mod pallet {
 				}
 				if let Some(amount) = maybe_dust {
 					Pallet::<T, I>::deposit_event(Event::DustLost { account: who.clone(), amount });
+					<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_dust_lost(
+						who, amount,
+					);
 				}
 				(result, maybe_dust)
 			})

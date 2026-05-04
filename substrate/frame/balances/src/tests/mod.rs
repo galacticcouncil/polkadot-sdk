@@ -51,6 +51,7 @@ mod dispatchable_tests;
 mod fungible_conformance_tests;
 mod fungible_tests;
 mod general_tests;
+mod hooks_tests;
 mod reentrancy_tests;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -112,6 +113,26 @@ impl pallet_transaction_payment::Config for Test {
 
 parameter_types! {
 	pub FooReason: TestId = TestId::Foo;
+	pub static OnTransferCalls: u32 = 0;
+	pub static OnMintCalls: u32 = 0;
+	pub static OnBurnCalls: u32 = 0;
+	pub static OnDustLostCalls: u32 = 0;
+}
+
+pub struct TestHooks;
+impl crate::BalancesHooks<u64, u64> for TestHooks {
+	fn on_transfer(_: &u64, _: &u64, _: u64) {
+		OnTransferCalls::set(OnTransferCalls::get() + 1);
+	}
+	fn on_mint(_: &u64, _: u64) {
+		OnMintCalls::set(OnMintCalls::get() + 1);
+	}
+	fn on_burn(_: &u64, _: u64) {
+		OnBurnCalls::set(OnBurnCalls::get() + 1);
+	}
+	fn on_dust_lost(_: &u64, _: u64) {
+		OnDustLostCalls::set(OnDustLostCalls::get() + 1);
+	}
 }
 
 #[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
@@ -125,6 +146,7 @@ impl Config for Test {
 	type RuntimeFreezeReason = TestId;
 	type FreezeIdentifier = TestId;
 	type MaxFreezes = VariantCountOf<TestId>;
+	type RuntimeHooks = TestHooks;
 }
 
 #[derive(Clone)]
