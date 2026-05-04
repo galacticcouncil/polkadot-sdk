@@ -159,6 +159,14 @@ pub trait BalancesHooks<AccountId, Balance> {
 	fn on_dust_lost(_who: &AccountId, _amount: Balance) {}
 	fn on_reserve(_who: &AccountId, _amount: Balance) {}
 	fn on_unreserve(_who: &AccountId, _amount: Balance) {}
+	/// Fires on `repatriate_reserved` only when `slashed != beneficiary`.
+	fn on_repatriate(
+		_slashed: &AccountId,
+		_beneficiary: &AccountId,
+		_amount: Balance,
+		_status: frame_support::traits::tokens::BalanceStatus,
+	) {
+	}
 }
 
 impl<AccountId, Balance> BalancesHooks<AccountId, Balance> for () {}
@@ -1293,6 +1301,12 @@ pub mod pallet {
 				amount: actual,
 				destination_status: status,
 			});
+			<T::RuntimeHooks as crate::BalancesHooks<T::AccountId, T::Balance>>::on_repatriate(
+				slashed,
+				beneficiary,
+				actual,
+				status,
+			);
 			Ok(actual)
 		}
 

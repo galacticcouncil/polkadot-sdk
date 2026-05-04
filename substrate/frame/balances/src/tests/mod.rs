@@ -119,6 +119,7 @@ parameter_types! {
 	pub static OnDustLostCalls: u32 = 0;
 	pub static OnReserveCalls: u32 = 0;
 	pub static OnUnreserveCalls: u32 = 0;
+	pub static OnRepatriateCalls: u32 = 0;
 }
 
 pub struct TestHooks;
@@ -140,6 +141,9 @@ impl crate::BalancesHooks<u64, u64> for TestHooks {
 	}
 	fn on_unreserve(_: &u64, _: u64) {
 		OnUnreserveCalls::set(OnUnreserveCalls::get() + 1);
+	}
+	fn on_repatriate(_: &u64, _: &u64, _: u64, _: frame_support::traits::tokens::BalanceStatus) {
+		OnRepatriateCalls::set(OnRepatriateCalls::get() + 1);
 	}
 }
 

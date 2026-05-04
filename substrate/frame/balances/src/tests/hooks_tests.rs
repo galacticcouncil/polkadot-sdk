@@ -18,14 +18,14 @@
 #![cfg(test)]
 
 use crate::tests::{
-	Balances, ExtBuilder, OnBurnCalls, OnDustLostCalls, OnMintCalls, OnReserveCalls,
-	OnTransferCalls, OnUnreserveCalls, RawOrigin,
+	Balances, ExtBuilder, OnBurnCalls, OnDustLostCalls, OnMintCalls, OnRepatriateCalls,
+	OnReserveCalls, OnTransferCalls, OnUnreserveCalls, RawOrigin,
 };
 use frame_support::{
 	assert_ok,
 	traits::{
 		fungible::Mutate,
-		tokens::{Fortitude, Precision, Preservation},
+		tokens::{BalanceStatus, Fortitude, Precision, Preservation},
 		Currency, ReservableCurrency,
 	},
 };
@@ -119,5 +119,58 @@ fn on_unreserve_hook_fires_with_actual_unreserved_amount() {
 		// unreserve(0) is a no-op and must NOT fire
 		let _ = <Balances as ReservableCurrency<_>>::unreserve(&1, 0);
 		assert_eq!(OnUnreserveCalls::get(), 1);
+	});
+}
+
+#[test]
+fn on_repatriate_hook_fires_when_slashed_differs_from_beneficiary() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
+		OnRepatriateCalls::set(0);
+
+		assert_ok!(<Balances as ReservableCurrency<_>>::repatriate_reserved(
+			&1,
+			&2,
+			3,
+			BalanceStatus::Free,
+		));
+		assert_eq!(OnRepatriateCalls::get(), 1);
+
+		// repatriate(0) is a no-op and must NOT fire
+		assert_ok!(<Balances as ReservableCurrency<_>>::repatriate_reserved(
+			&1,
+			&2,
+			0,
+			BalanceStatus::Free,
+		));
+		assert_eq!(OnRepatriateCalls::get(), 1);
+	});
+}
+
+#[test]
+fn on_repatriate_hook_does_not_fire_when_slashed_equals_beneficiary() {
+	ExtBuilder::default().monied(true).build_and_execute_with(|| {
+		assert_ok!(<Balances as ReservableCurrency<_>>::reserve(&1, 5));
+		OnRepatriateCalls::set(0);
+		OnUnreserveCalls::set(0);
+
+		// slashed == beneficiary, status=Free → delegates to unreserve internally
+		assert_ok!(<Balances as ReservableCurrency<_>>::repatriate_reserved(
+			&1,
+			&1,
+			3,
+			BalanceStatus::Free,
+		));
+		assert_eq!(OnRepatriateCalls::get(), 0);
+		assert_eq!(OnUnreserveCalls::get(), 1);
+
+		// slashed == beneficiary, status=Reserved → no-op
+		assert_ok!(<Balances as ReservableCurrency<_>>::repatriate_reserved(
+			&1,
+			&1,
+			1,
+			BalanceStatus::Reserved,
+		));
+		assert_eq!(OnRepatriateCalls::get(), 0);
 	});
 }
