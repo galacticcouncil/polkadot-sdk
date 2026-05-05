@@ -23387,6 +23387,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "082c634447671551ea1cb8f1182d1b8a7109f7316a044b974ad9e663935f56c8"
 dependencies = [
  "futures",
+ "hex-literal",
  "parity-scale-codec",
  "parking_lot 0.12.3",
  "schnellru",
