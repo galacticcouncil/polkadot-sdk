@@ -22766,6 +22766,7 @@ name = "sp-blockchain"
 version = "40.0.0"
 dependencies = [
  "futures",
+ "hex-literal",
  "parity-scale-codec",
  "parking_lot 0.12.3",
  "schnellru",

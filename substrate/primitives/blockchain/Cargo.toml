@@ -37,3 +37,6 @@ sp-state-machine.workspace = true
 thiserror = { workspace = true }
 tracing = { workspace = true, default-features = true }
 serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+hex-literal = { workspace = true }
