@@ -231,11 +231,6 @@ where
 			let relay_parent_offset =
 				para_client.runtime_api().relay_parent_offset(best_hash).unwrap_or_default();
 
-			let Ok(para_slot_duration) = crate::slot_duration(&*para_client) else {
-				tracing::error!(target: LOG_TARGET, "Failed to fetch slot duration from runtime.");
-				continue;
-			};
-
 			let Ok(Some(rp_data)) = offset_relay_parent_find_descendants(
 				&relay_client,
 				relay_best_header,
@@ -244,14 +239,6 @@ where
 			.await
 			else {
 				continue
-			};
-
-			let Some(para_slot) = adjust_para_to_relay_parent_slot(
-				rp_data.relay_parent(),
-				relay_chain_slot_duration,
-				para_slot_duration,
-			) else {
-				continue;
 			};
 
 			let relay_parent = rp_data.relay_parent().hash();
@@ -269,6 +256,22 @@ where
 			// Distance from included block to best parent (unincluded segment length).
 			let unincluded_segment_len =
 				parent_header.number().saturating_sub(*included_header.number());
+
+			let Ok(para_slot_duration) =
+				crate::slot_duration_at(&*para_client, parent_hash)
+			else {
+				tracing::error!(target: LOG_TARGET, "Failed to fetch slot duration from runtime.");
+				continue;
+			};
+
+			// Use the slot calculated from relay parent
+			let Some(para_slot) = adjust_para_to_relay_parent_slot(
+				rp_data.relay_parent(),
+				relay_chain_slot_duration,
+				para_slot_duration,
+			) else {
+				continue;
+			};
 
 			// Retrieve the core selector.
 			let (core_selector, claim_queue_offset) =
