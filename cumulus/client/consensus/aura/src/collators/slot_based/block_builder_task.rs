@@ -195,16 +195,14 @@ where
 		};
 
 		let mut relay_chain_data_cache = RelayChainDataCache::new(relay_client.clone(), para_id);
-
-		let mut maybe_connection_helper = relay_client
-			.overseer_handle()
-			.ok()
-			.map(|h| BackingGroupConnectionHelper::new(para_client.clone(), keystore.clone(), h.clone()))
-			.or_else(|| {
-				tracing::warn!(target: LOG_TARGET,
-					"Relay chain interface does not provide overseer handle. Backing group pre-connect is disabled.");
-				None
-			});
+		let mut connection_helper = BackingGroupConnectionHelper::new(
+			keystore.clone(),
+			relay_client
+				.overseer_handle()
+				// Should never fail. If it fails, then providing collations to relay chain
+				// doesn't work either. So it is fine to panic here.
+				.expect("Relay chain interface must provide overseer handle."),
+		);
 
 		loop {
 			// We wait here until the next slot arrives.
@@ -233,11 +231,6 @@ where
 			let relay_parent_offset =
 				para_client.runtime_api().relay_parent_offset(best_hash).unwrap_or_default();
 
-			let Ok(para_slot_duration) = crate::slot_duration(&*para_client) else {
-				tracing::error!(target: LOG_TARGET, "Failed to fetch slot duration from runtime.");
-				continue;
-			};
-
 			let Ok(Some(rp_data)) = offset_relay_parent_find_descendants(
 				&relay_client,
 				relay_best_header,
@@ -246,14 +239,6 @@ where
 			.await
 			else {
 				continue
-			};
-
-			let Some(para_slot) = adjust_para_to_relay_parent_slot(
-				rp_data.relay_parent(),
-				relay_chain_slot_duration,
-				para_slot_duration,
-			) else {
-				continue;
 			};
 
 			let relay_parent = rp_data.relay_parent().hash();
@@ -271,6 +256,22 @@ where
 			// Distance from included block to best parent (unincluded segment length).
 			let unincluded_segment_len =
 				parent_header.number().saturating_sub(*included_header.number());
+
+			let Ok(para_slot_duration) =
+				crate::slot_duration_at(&*para_client, parent_hash)
+			else {
+				tracing::error!(target: LOG_TARGET, "Failed to fetch slot duration from runtime.");
+				continue;
+			};
+
+			// Use the slot calculated from relay parent
+			let Some(para_slot) = adjust_para_to_relay_parent_slot(
+				rp_data.relay_parent(),
+				relay_chain_slot_duration,
+				para_slot_duration,
+			) else {
+				continue;
+			};
 
 			// Retrieve the core selector.
 			let (core_selector, claim_queue_offset) =
@@ -339,6 +340,10 @@ where
 
 			let included_header_hash = included_header.hash();
 
+			if let Ok(authorities) = para_client.runtime_api().authorities(parent_hash) {
+				connection_helper.update::<P>(para_slot.slot, &authorities).await;
+			}
+
 			let slot_claim = match crate::collators::can_build_upon::<_, _, P>(
 				para_slot.slot,
 				relay_slot,
@@ -364,9 +369,6 @@ where
 						slot = ?para_slot.slot,
 						"Not building block."
 					);
-					if let Some(ref mut connection_helper) = maybe_connection_helper {
-						connection_helper.update::<Block, P>(para_slot.slot, parent_hash).await;
-					}
 					continue
 				},
 			};
