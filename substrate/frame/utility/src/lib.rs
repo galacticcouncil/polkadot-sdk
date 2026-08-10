@@ -81,8 +81,13 @@ pub trait BatchHook {
 	fn on_batch_start() -> sp_runtime::DispatchResult;
 	/// Will be called after the batch was executed.
 	///
-	/// Depending on the exact batch call used, it may not be called when a batch item failed.
-	fn on_batch_end() -> sp_runtime::DispatchResult;
+	/// Called exactly once for every `on_batch_start` that returned `Ok`, on every exit path of
+	/// every batch variant — including a batch interrupted by a failing item. Implementations may
+	/// therefore keep state paired across the two hooks.
+	///
+	/// Infallible by design: by the time it runs, items may already have been committed, so there
+	/// is no outcome an error could usefully change. Implementations report their own problems.
+	fn on_batch_end();
 }
 
 impl BatchHook for () {
@@ -90,10 +95,7 @@ impl BatchHook for () {
 		Ok(())
 	}
 
-	fn on_batch_end() -> sp_runtime::DispatchResult {
-		Ok(())
-	}
-
+	fn on_batch_end() {}
 }
 
 
@@ -231,42 +233,40 @@ pub mod pallet {
 				return Err(BadOrigin.into())
 			}
 
-			T::BatchHook::on_batch_start()?;
-
 			let is_root = ensure_root(origin.clone()).is_ok();
 			let calls_len = calls.len();
 			ensure!(calls_len <= Self::batched_calls_limit() as usize, Error::<T>::TooManyCalls);
 
-			// Track the actual weight of each of the batch calls.
-			let mut weight = Weight::zero();
-			for (index, call) in calls.into_iter().enumerate() {
-				let info = call.get_dispatch_info();
-				// If origin is root, don't apply any dispatch filters; root can call anything.
-				let result = if is_root {
-					call.dispatch_bypass_filter(origin.clone())
-				} else {
-					call.dispatch(origin.clone())
-				};
-				// Add the weight of this call.
-				weight = weight.saturating_add(extract_actual_weight(&result, &info));
-				if let Err(e) = result {
-					Self::deposit_event(Event::BatchInterrupted {
-						index: index as u32,
-						error: e.error,
-					});
-					// Take the weight of this function itself into account.
-					let base_weight = T::WeightInfo::batch(index.saturating_add(1) as u32);
-					// Return the actual used weight + base_weight of this call.
-					return Ok(Some(base_weight.saturating_add(weight)).into())
+			Self::with_batch_context(|| {
+				// Track the actual weight of each of the batch calls.
+				let mut weight = Weight::zero();
+				for (index, call) in calls.into_iter().enumerate() {
+					let info = call.get_dispatch_info();
+					// If origin is root, don't apply any dispatch filters; root can call anything.
+					let result = if is_root {
+						call.dispatch_bypass_filter(origin.clone())
+					} else {
+						call.dispatch(origin.clone())
+					};
+					// Add the weight of this call.
+					weight = weight.saturating_add(extract_actual_weight(&result, &info));
+					if let Err(e) = result {
+						Self::deposit_event(Event::BatchInterrupted {
+							index: index as u32,
+							error: e.error,
+						});
+						// Take the weight of this function itself into account.
+						let base_weight = T::WeightInfo::batch(index.saturating_add(1) as u32);
+						// Return the actual used weight + base_weight of this call.
+						return Ok(Some(base_weight.saturating_add(weight)).into())
+					}
+					Self::deposit_event(Event::ItemCompleted);
 				}
-				Self::deposit_event(Event::ItemCompleted);
-			}
-			Self::deposit_event(Event::BatchCompleted);
+				Self::deposit_event(Event::BatchCompleted);
 
-			T::BatchHook::on_batch_end()?;
-
-			let base_weight = T::WeightInfo::batch(calls_len as u32);
-			Ok(Some(base_weight.saturating_add(weight)).into())
+				let base_weight = T::WeightInfo::batch(calls_len as u32);
+				Ok(Some(base_weight.saturating_add(weight)).into())
+			})
 		}
 
 		/// Send a call through an indexed pseudonym of the sender.
@@ -345,47 +345,45 @@ pub mod pallet {
 				return Err(BadOrigin.into())
 			}
 
-			T::BatchHook::on_batch_start()?;
-
 			let is_root = ensure_root(origin.clone()).is_ok();
 			let calls_len = calls.len();
 			ensure!(calls_len <= Self::batched_calls_limit() as usize, Error::<T>::TooManyCalls);
 
-			// Track the actual weight of each of the batch calls.
-			let mut weight = Weight::zero();
-			for (index, call) in calls.into_iter().enumerate() {
-				let info = call.get_dispatch_info();
-				// If origin is root, bypass any dispatch filter; root can call anything.
-				let result = if is_root {
-					call.dispatch_bypass_filter(origin.clone())
-				} else {
-					let mut filtered_origin = origin.clone();
-					// Don't allow users to nest `batch_all` calls.
-					filtered_origin.add_filter(
-						move |c: &<T as frame_system::Config>::RuntimeCall| {
-							let c = <T as Config>::RuntimeCall::from_ref(c);
-							!matches!(c.is_sub_type(), Some(Call::batch_all { .. }))
-						},
-					);
-					call.dispatch(filtered_origin)
-				};
-				// Add the weight of this call.
-				weight = weight.saturating_add(extract_actual_weight(&result, &info));
-				result.map_err(|mut err| {
-					// Take the weight of this function itself into account.
-					let base_weight = T::WeightInfo::batch_all(index.saturating_add(1) as u32);
-					// Return the actual used weight + base_weight of this call.
-					err.post_info = Some(base_weight.saturating_add(weight)).into();
-					err
-				})?;
-				Self::deposit_event(Event::ItemCompleted);
-			}
-			Self::deposit_event(Event::BatchCompleted);
+			Self::with_batch_context(|| {
+				// Track the actual weight of each of the batch calls.
+				let mut weight = Weight::zero();
+				for (index, call) in calls.into_iter().enumerate() {
+					let info = call.get_dispatch_info();
+					// If origin is root, bypass any dispatch filter; root can call anything.
+					let result = if is_root {
+						call.dispatch_bypass_filter(origin.clone())
+					} else {
+						let mut filtered_origin = origin.clone();
+						// Don't allow users to nest `batch_all` calls.
+						filtered_origin.add_filter(
+							move |c: &<T as frame_system::Config>::RuntimeCall| {
+								let c = <T as Config>::RuntimeCall::from_ref(c);
+								!matches!(c.is_sub_type(), Some(Call::batch_all { .. }))
+							},
+						);
+						call.dispatch(filtered_origin)
+					};
+					// Add the weight of this call.
+					weight = weight.saturating_add(extract_actual_weight(&result, &info));
+					result.map_err(|mut err| {
+						// Take the weight of this function itself into account.
+						let base_weight = T::WeightInfo::batch_all(index.saturating_add(1) as u32);
+						// Return the actual used weight + base_weight of this call.
+						err.post_info = Some(base_weight.saturating_add(weight)).into();
+						err
+					})?;
+					Self::deposit_event(Event::ItemCompleted);
+				}
+				Self::deposit_event(Event::BatchCompleted);
 
-			T::BatchHook::on_batch_end()?;
-
-			let base_weight = T::WeightInfo::batch_all(calls_len as u32);
-			Ok(Some(base_weight.saturating_add(weight)).into())
+				let base_weight = T::WeightInfo::batch_all(calls_len as u32);
+				Ok(Some(base_weight.saturating_add(weight)).into())
+			})
 		}
 
 		/// Dispatches a function call with a provided origin.
@@ -446,43 +444,41 @@ pub mod pallet {
 				return Err(BadOrigin.into())
 			}
 
-			T::BatchHook::on_batch_start()?;
-
 			let is_root = ensure_root(origin.clone()).is_ok();
 			let calls_len = calls.len();
 			ensure!(calls_len <= Self::batched_calls_limit() as usize, Error::<T>::TooManyCalls);
 
-			// Track the actual weight of each of the batch calls.
-			let mut weight = Weight::zero();
-			// Track failed dispatch occur.
-			let mut has_error: bool = false;
-			for call in calls.into_iter() {
-				let info = call.get_dispatch_info();
-				// If origin is root, don't apply any dispatch filters; root can call anything.
-				let result = if is_root {
-					call.dispatch_bypass_filter(origin.clone())
-				} else {
-					call.dispatch(origin.clone())
-				};
-				// Add the weight of this call.
-				weight = weight.saturating_add(extract_actual_weight(&result, &info));
-				if let Err(e) = result {
-					has_error = true;
-					Self::deposit_event(Event::ItemFailed { error: e.error });
-				} else {
-					Self::deposit_event(Event::ItemCompleted);
+			Self::with_batch_context(|| {
+				// Track the actual weight of each of the batch calls.
+				let mut weight = Weight::zero();
+				// Track failed dispatch occur.
+				let mut has_error: bool = false;
+				for call in calls.into_iter() {
+					let info = call.get_dispatch_info();
+					// If origin is root, don't apply any dispatch filters; root can call anything.
+					let result = if is_root {
+						call.dispatch_bypass_filter(origin.clone())
+					} else {
+						call.dispatch(origin.clone())
+					};
+					// Add the weight of this call.
+					weight = weight.saturating_add(extract_actual_weight(&result, &info));
+					if let Err(e) = result {
+						has_error = true;
+						Self::deposit_event(Event::ItemFailed { error: e.error });
+					} else {
+						Self::deposit_event(Event::ItemCompleted);
+					}
 				}
-			}
-			if has_error {
-				Self::deposit_event(Event::BatchCompletedWithErrors);
-			} else {
-				Self::deposit_event(Event::BatchCompleted);
-			}
+				if has_error {
+					Self::deposit_event(Event::BatchCompletedWithErrors);
+				} else {
+					Self::deposit_event(Event::BatchCompleted);
+				}
 
-			T::BatchHook::on_batch_end()?;
-
-			let base_weight = T::WeightInfo::batch(calls_len as u32);
-			Ok(Some(base_weight.saturating_add(weight)).into())
+				let base_weight = T::WeightInfo::batch(calls_len as u32);
+				Ok(Some(base_weight.saturating_add(weight)).into())
+			})
 		}
 
 		/// Dispatch a function call with a specified weight.
@@ -627,6 +623,20 @@ pub mod pallet {
 	}
 
 	impl<T: Config> Pallet<T> {
+		/// Runs a batch body between `on_batch_start` and `on_batch_end`.
+		///
+		/// Wrapping the body is what keeps the hook pair balanced on every exit path: `batch`
+		/// returns `Ok` early once an item fails, so a call placed after the body would only be
+		/// reachable when the batch runs to completion.
+		fn with_batch_context(
+			body: impl FnOnce() -> DispatchResultWithPostInfo,
+		) -> DispatchResultWithPostInfo {
+			T::BatchHook::on_batch_start()?;
+			let result = body();
+			T::BatchHook::on_batch_end();
+			result
+		}
+
 		/// Get the accumulated `weight` and the dispatch class for the given `calls`.
 		fn weight_and_dispatch_class(
 			calls: &[<T as Config>::RuntimeCall],
