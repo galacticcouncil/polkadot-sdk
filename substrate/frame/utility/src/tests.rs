@@ -219,11 +219,45 @@ impl mock_democracy::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type ExternalMajorityOrigin = EnsureProportionAtLeast<u64, Instance1, 3, 4>;
 }
+thread_local! {
+	static BATCH_HOOK_STARTS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+	static BATCH_HOOK_ENDS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+/// Records hook invocations so tests can assert `on_batch_start`/`on_batch_end` stay balanced.
+pub struct CountingBatchHook;
+
+impl CountingBatchHook {
+	fn starts() -> u32 {
+		BATCH_HOOK_STARTS.with(|v| v.get())
+	}
+
+	fn ends() -> u32 {
+		BATCH_HOOK_ENDS.with(|v| v.get())
+	}
+
+	fn reset() {
+		BATCH_HOOK_STARTS.with(|v| v.set(0));
+		BATCH_HOOK_ENDS.with(|v| v.set(0));
+	}
+}
+
+impl BatchHook for CountingBatchHook {
+	fn on_batch_start() -> sp_runtime::DispatchResult {
+		BATCH_HOOK_STARTS.with(|v| v.set(v.get() + 1));
+		Ok(())
+	}
+
+	fn on_batch_end() {
+		BATCH_HOOK_ENDS.with(|v| v.set(v.get() + 1));
+	}
+}
+
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
 	type PalletsOrigin = OriginCaller;
-	type BatchHook = ();
+	type BatchHook = CountingBatchHook;
 	type WeightInfo = ();
 }
 
@@ -1089,5 +1123,95 @@ fn if_else_with_nested_if_else_works() {
 
 		// Ensure the correct event was triggered for the main call(nested if_else).
 		System::assert_last_event(utility::Event::IfElseMainSuccess.into());
+	});
+}
+
+#[test]
+fn batch_hooks_should_stay_balanced_when_an_item_fails() {
+	new_test_ext().execute_with(|| {
+		CountingBatchHook::reset();
+
+		// Second transfer exceeds the free balance left by the first, interrupting the batch.
+		assert_ok!(Utility::batch(
+			RuntimeOrigin::signed(1),
+			vec![call_transfer(2, 5), call_transfer(2, 10)]
+		));
+		System::assert_has_event(
+			utility::Event::BatchInterrupted {
+				index: 1,
+				error: TokenError::FundsUnavailable.into(),
+			}
+			.into(),
+		);
+
+		assert_eq!(CountingBatchHook::starts(), 1);
+		assert_eq!(CountingBatchHook::ends(), 1);
+	});
+}
+
+#[test]
+fn batch_hooks_should_stay_balanced_when_all_items_succeed() {
+	new_test_ext().execute_with(|| {
+		CountingBatchHook::reset();
+
+		assert_ok!(Utility::batch(
+			RuntimeOrigin::signed(1),
+			vec![call_transfer(2, 5), call_transfer(2, 5)]
+		));
+		System::assert_last_event(utility::Event::BatchCompleted.into());
+
+		assert_eq!(CountingBatchHook::starts(), 1);
+		assert_eq!(CountingBatchHook::ends(), 1);
+	});
+}
+
+#[test]
+fn batch_all_hooks_should_stay_balanced_when_an_item_fails() {
+	new_test_ext().execute_with(|| {
+		CountingBatchHook::reset();
+
+		assert_err_ignore_postinfo!(
+			Utility::batch_all(
+				RuntimeOrigin::signed(1),
+				vec![call_transfer(2, 5), call_transfer(2, 10)]
+			),
+			TokenError::FundsUnavailable
+		);
+
+		assert_eq!(CountingBatchHook::starts(), 1);
+		assert_eq!(CountingBatchHook::ends(), 1);
+	});
+}
+
+#[test]
+fn force_batch_hooks_should_stay_balanced_when_items_fail() {
+	new_test_ext().execute_with(|| {
+		CountingBatchHook::reset();
+
+		assert_ok!(Utility::force_batch(
+			RuntimeOrigin::signed(1),
+			vec![call_transfer(2, 5), call_transfer(2, 10), call_transfer(2, 5)]
+		));
+		System::assert_last_event(utility::Event::BatchCompletedWithErrors.into());
+
+		assert_eq!(CountingBatchHook::starts(), 1);
+		assert_eq!(CountingBatchHook::ends(), 1);
+	});
+}
+
+#[test]
+fn nested_batch_hooks_should_stay_balanced_when_each_inner_batch_is_interrupted() {
+	new_test_ext().execute_with(|| {
+		CountingBatchHook::reset();
+
+		// Every inner batch is interrupted yet returns `Ok`, so the outer batch runs all of them:
+		// three inner hook pairs plus the outer one.
+		let inner =
+			|| RuntimeCall::Utility(UtilityCall::batch { calls: vec![call_transfer(2, 100)] });
+		assert_ok!(Utility::batch(RuntimeOrigin::signed(1), vec![inner(), inner(), inner()]));
+		System::assert_last_event(utility::Event::BatchCompleted.into());
+
+		assert_eq!(CountingBatchHook::starts(), 4);
+		assert_eq!(CountingBatchHook::ends(), 4);
 	});
 }
