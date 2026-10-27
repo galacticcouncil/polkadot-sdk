@@ -363,6 +363,59 @@ fn generate_runtime_api_base_structures() -> Result<TokenStream> {
 				fn register_extension<E: #crate_::Extension>(&mut self, extension: E) {
 					std::cell::RefCell::borrow_mut(&self.extensions).register(extension);
 				}
+
+				fn read_storage<R, F: FnOnce(std::option::Option<&[u8]>) -> R>(
+					&self,
+					at: <Block as #crate_::BlockT>::Hash,
+					key: &[u8],
+					f: F,
+				) -> std::result::Result<R, #crate_::ApiError> where Self: Sized {
+					// Same lookup order as `Ext::storage`: the overlay, then the backend.
+					let mut changes = std::cell::RefCell::borrow_mut(&self.changes);
+					if let std::option::Option::Some(value) = #crate_::OverlayedChanges::storage(&mut changes, key) {
+						return std::result::Result::Ok(f(value));
+					}
+					std::mem::drop(changes);
+
+					let state = #crate_::CallApiAt::<Block>::state_at(self.call, at)?;
+					let value = #crate_::StateBackend::<#crate_::HashingFor<Block>>::storage(&state, key)
+						.map_err(|e| #crate_::ApiError::Application(std::convert::From::from(format!("{e:?}"))))?;
+					std::result::Result::Ok(f(std::option::Option::as_deref(&value)))
+				}
+
+				fn transaction_top_changes(
+					&self,
+					at: <Block as #crate_::BlockT>::Hash,
+					keep: &dyn Fn(&[u8]) -> bool,
+				) -> std::result::Result<#crate_::TransactionChanges, #crate_::ApiError> where Self: Sized {
+					let keys = #crate_::OverlayedChanges::current_transaction_top_keys(
+						&std::cell::RefCell::borrow(&self.changes),
+					);
+					// `keep` may call back into this instance, so it runs with `changes` unborrowed.
+					let kept: std::collections::BTreeSet<std::vec::Vec<u8>> =
+						keys.into_iter().filter(|key| keep(key)).collect();
+					let written = #crate_::OverlayedChanges::current_transaction_top_changes(
+						&std::cell::RefCell::borrow(&self.changes),
+						|key| kept.contains(key),
+					);
+					let state = #crate_::CallApiAt::<Block>::state_at(self.call, at)?;
+					let mut out = #crate_::TransactionChanges::default();
+					for (key, prior, post) in written {
+						let pre = match prior {
+							#crate_::PriorValue::Overlay(value) => value,
+							#crate_::PriorValue::Backend => #crate_::StateBackend::<#crate_::HashingFor<Block>>::storage(&state, &key)
+								.map_err(|e| #crate_::ApiError::Application(std::convert::From::from(format!("{e:?}"))))?,
+							#crate_::PriorValue::Appended => {
+								out.appended.push(key);
+								continue;
+							},
+						};
+						if pre != post {
+							out.changes.push(#crate_::KeyChange { key, pre, post });
+						}
+					}
+					std::result::Result::Ok(out)
+				}
 			}
 
 			#[automatically_derived]

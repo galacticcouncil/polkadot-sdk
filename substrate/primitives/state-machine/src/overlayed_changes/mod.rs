@@ -45,7 +45,9 @@ use std::{
 	boxed::Box,
 };
 
-pub use self::changeset::{AlreadyInRuntime, NoOpenTransaction, NotInRuntime, OverlayedValue};
+pub use self::changeset::{
+	AlreadyInRuntime, NoOpenTransaction, NotInRuntime, OverlayedValue, PriorValue,
+};
 
 /// Changes that are made outside of extrinsics are marked with this index;
 pub const NO_EXTRINSIC_INDEX: u32 = 0xffffffff;
@@ -537,6 +539,20 @@ impl<H: Hasher> OverlayedChanges<H> {
 	) -> impl Iterator<Item = (impl Iterator<Item = (&StorageKey, &mut OverlayedValue)>, &ChildInfo)>
 	{
 		self.children.values_mut().map(|v| (v.0.changes_mut(), &v.1))
+	}
+
+	/// Top keys written in the innermost open transaction. Child tries aren't included.
+	pub fn current_transaction_top_keys(&self) -> Vec<StorageKey> {
+		self.top.current_transaction_keys()
+	}
+
+	/// Top keys written in the innermost open transaction, with their prior and current value.
+	/// Child tries aren't included.
+	pub fn current_transaction_top_changes(
+		&self,
+		keep: impl Fn(&[u8]) -> bool,
+	) -> Vec<(StorageKey, PriorValue, Option<StorageValue>)> {
+		self.top.current_transaction_changes(keep)
 	}
 
 	/// Get an iterator over all top changes as been by the current transaction.
@@ -1175,5 +1191,20 @@ mod tests {
 		let next_to_40 = overlay.child_iter_after(child, &[40]).next().unwrap();
 		assert_eq!(next_to_40.0.to_vec(), vec![50]);
 		assert_eq!(next_to_40.1.value(), Some(&vec![50]));
+	}
+
+	#[test]
+	fn current_transaction_top_changes_should_exclude_child_writes() {
+		let child_info = ChildInfo::new_default(b"Child1");
+		let mut overlay = OverlayedChanges::<Blake2Hasher>::default();
+		overlay.start_transaction();
+		overlay.set_child_storage(&child_info, b"child".to_vec(), Some(b"c1".to_vec()));
+		overlay.set_storage(b"top".to_vec(), Some(b"t1".to_vec()));
+
+		assert_eq!(overlay.current_transaction_top_keys(), vec![b"top".to_vec()]);
+		assert_eq!(
+			overlay.current_transaction_top_changes(|_| true),
+			vec![(b"top".to_vec(), PriorValue::Backend, Some(b"t1".to_vec()))]
+		);
 	}
 }
