@@ -16146,9 +16146,8 @@ dependencies = [
  "serde_json",
  "sp-api 41.0.0",
  "sp-block-builder",
+ "sp-blockchain 44.0.0",
  "sp-consensus 0.47.0",
- "sp-blockchain",
- "sp-consensus",
  "sp-consensus-aura",
  "sp-core 40.0.0",
  "sp-genesis-builder 0.22.0",
@@ -23387,7 +23386,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "082c634447671551ea1cb8f1182d1b8a7109f7316a044b974ad9e663935f56c8"
 dependencies = [
  "futures",
- "hex-literal",
  "parity-scale-codec",
  "parking_lot 0.12.3",
  "schnellru",
@@ -23406,9 +23404,12 @@ name = "sp-blockchain"
 version = "44.0.0"
 dependencies = [
  "futures",
+ "hex-literal",
  "parity-scale-codec",
  "parking_lot 0.12.3",
  "schnellru",
+ "serde",
+ "serde_json",
  "sp-api 41.0.0",
  "sp-consensus 0.47.0",
  "sp-core 40.0.0",
