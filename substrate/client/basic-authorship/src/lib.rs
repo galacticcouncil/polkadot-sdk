@@ -72,6 +72,10 @@
 //! ```
 
 mod basic_authorship;
+mod guard;
 
-pub use crate::basic_authorship::{Proposer, ProposerFactory, DEFAULT_BLOCK_SIZE_LIMIT};
+pub use crate::{
+	basic_authorship::{Proposer, ProposerFactory, DEFAULT_BLOCK_SIZE_LIMIT},
+	guard::{ExtrinsicGuard, GuardContext, GuardOutcome, GuardSession},
+};
 pub use sp_consensus::ProposeArgs;

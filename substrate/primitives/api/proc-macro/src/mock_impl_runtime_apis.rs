@@ -131,6 +131,23 @@ fn implement_common_api_traits(block_type: TypePath, self_ty: Type) -> Result<To
 			fn register_extension<E: #crate_::Extension>(&mut self, _: E) {
 				unimplemented!("`register_extension` not implemented for runtime api mocks")
 			}
+
+			fn read_storage<R, F: FnOnce(Option<&[u8]>) -> R>(
+				&self,
+				_: <#block_type as #crate_::BlockT>::Hash,
+				_: &[u8],
+				_: F,
+			) -> std::result::Result<R, #crate_::ApiError> where Self: Sized {
+				unimplemented!("`read_storage` not implemented for runtime api mocks")
+			}
+
+			fn transaction_top_changes(
+				&self,
+				_: <#block_type as #crate_::BlockT>::Hash,
+				_: &dyn Fn(&[u8]) -> bool,
+			) -> std::result::Result<#crate_::TransactionChanges, #crate_::ApiError> where Self: Sized {
+				unimplemented!("`transaction_top_changes` not implemented for runtime api mocks")
+			}
 		}
 
 		impl #crate_::Core<#block_type> for #self_ty {

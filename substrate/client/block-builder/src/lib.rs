@@ -29,8 +29,8 @@
 use codec::Encode;
 
 use sp_api::{
-	ApiExt, ApiRef, CallApiAt, Core, ProofRecorder, ProvideRuntimeApi, StorageChanges,
-	TransactionOutcome,
+	ApiError, ApiExt, ApiRef, CallApiAt, Core, ProofRecorder, ProvideRuntimeApi, StorageChanges,
+	TransactionChanges, TransactionOutcome,
 };
 use sp_blockchain::{ApplyExtrinsicFailed, Error, HeaderBackend};
 use sp_core::traits::CallContext;
@@ -202,6 +202,41 @@ impl<Block: BlockT> BuiltBlock<Block> {
 	}
 }
 
+/// A runtime API view whose every call runs in a nested transaction that is rolled back.
+///
+/// A runtime call made inside an open transaction joins it, so reads made while an extrinsic's
+/// transaction is about to be committed would otherwise end up in the block's storage proof.
+pub struct Isolated<'a, Block: BlockT, Api> {
+	api: &'a Api,
+	parent_hash: Block::Hash,
+}
+
+impl<'a, Block: BlockT, Api: ApiExt<Block>> Isolated<'a, Block, Api> {
+	/// Run `f` in a nested transaction and roll it back afterwards.
+	pub fn read<R>(&self, f: impl FnOnce(&Api) -> R) -> R {
+		self.api.execute_in_transaction(|api| TransactionOutcome::Rollback(f(api)))
+	}
+
+	/// Pass the current value of `key` to `f`, read natively without a runtime call.
+	pub fn storage<R>(
+		&self,
+		key: &[u8],
+		f: impl FnOnce(Option<&[u8]>) -> R,
+	) -> Result<R, ApiError> {
+		self.api.read_storage(self.parent_hash, key, f)
+	}
+
+	/// What the innermost open transaction changed in top-level storage; child tries aren't
+	/// included. Inside [`BlockBuilder::push_with`]'s `decide` that is exactly the extrinsic being
+	/// decided on. Only keys `keep` accepts are resolved.
+	pub fn top_changes(
+		&self,
+		keep: &dyn Fn(&[u8]) -> bool,
+	) -> Result<TransactionChanges, ApiError> {
+		self.api.transaction_top_changes(self.parent_hash, keep)
+	}
+}
+
 /// Utility for building new (valid) blocks from a stream of extrinsics.
 pub struct BlockBuilder<'a, Block: BlockT, C: ProvideRuntimeApi<Block> + 'a> {
 	extrinsics: Vec<Block::Extrinsic>,
@@ -292,6 +327,28 @@ where
 	///
 	/// This will ensure the extrinsic can be validly executed (by executing it).
 	pub fn push(&mut self, xt: <Block as BlockT>::Extrinsic) -> Result<(), Error> {
+		self.push_with(xt, |_| true).map(drop)
+	}
+
+	/// Push an extrinsic, letting `decide` inspect the post-execution state before it is kept.
+	///
+	/// `decide` runs only when the extrinsic was applied (`Ok(Ok(_))` or a failed dispatch), inside
+	/// the same storage transaction. Returning `true` commits the extrinsic, `false` rolls back its
+	/// state changes and its proof recording as if it had never been attempted.
+	///
+	/// `decide` only gets an [`Isolated`] view, so whatever it reads never reaches the block's
+	/// storage proof, even on the commit path.
+	///
+	/// Returns `Ok(true)` when the extrinsic was included and `Ok(false)` when `decide` rejected
+	/// it.
+	pub fn push_with<F>(
+		&mut self,
+		xt: <Block as BlockT>::Extrinsic,
+		decide: F,
+	) -> Result<bool, Error>
+	where
+		F: FnOnce(&Isolated<'_, Block, C::Api>) -> bool,
+	{
 		let parent_hash = self.parent_hash;
 		let extrinsics = &mut self.extrinsics;
 		let version = self.version;
@@ -307,8 +364,20 @@ where
 
 			match res {
 				Ok(Ok(_)) => {
-					extrinsics.push(xt);
-					TransactionOutcome::Commit(Ok(()))
+					let recorded_before = api.proof_recorder().map(|r| r.estimate_encoded_size());
+					let keep = decide(&Isolated { api, parent_hash });
+					debug_assert_eq!(
+						recorded_before,
+						api.proof_recorder().map(|r| r.estimate_encoded_size()),
+						"`decide` must not add to the storage proof",
+					);
+
+					if keep {
+						extrinsics.push(xt);
+						TransactionOutcome::Commit(Ok(true))
+					} else {
+						TransactionOutcome::Rollback(Ok(false))
+					}
 				},
 				Ok(Err(tx_validity)) => TransactionOutcome::Rollback(Err(
 					ApplyExtrinsicFailed::Validity(tx_validity).into(),
@@ -316,6 +385,18 @@ where
 				Err(e) => TransactionOutcome::Rollback(Err(Error::from(e))),
 			}
 		})
+	}
+
+	/// Run `f` against the current block state in a transaction that is always rolled back.
+	///
+	/// Neither the state changes nor the storage proof entries made by `f` survive.
+	pub fn read_with<R>(&self, f: impl FnOnce(&C::Api) -> R) -> R {
+		self.isolated().read(f)
+	}
+
+	/// An [`Isolated`] view of the current block state.
+	pub fn isolated(&self) -> Isolated<'_, Block, C::Api> {
+		Isolated { api: &*self.api, parent_hash: self.parent_hash }
 	}
 
 	/// Consume the builder to build a valid `Block` containing all pushed extrinsics.
@@ -384,8 +465,8 @@ mod tests {
 	use sp_core::Blake2Hasher;
 	use sp_state_machine::Backend;
 	use substrate_test_runtime_client::{
-		runtime::{Block, ExtrinsicBuilder},
-		DefaultTestClientBuilderExt, TestClientBuilderExt,
+		runtime::{Block, Block as TestBlock, Extrinsic, ExtrinsicBuilder, TestAPI, Transfer},
+		DefaultTestClientBuilderExt, Sr25519Keyring, TestClient, TestClientBuilderExt,
 	};
 
 	#[test]
@@ -472,5 +553,418 @@ mod tests {
 		assert!(proof_without_panic > proof_with_panic);
 		assert!(proof_without_panic > proof_empty_block);
 		assert_eq!(proof_empty_block, proof_with_panic);
+	}
+
+	fn new_builder(client: &TestClient) -> BlockBuilder<'_, TestBlock, TestClient> {
+		BlockBuilderBuilder::new(client)
+			.on_parent_block(client.info().best_hash)
+			.with_parent_block_number(0)
+			.enable_proof_recording()
+			.build()
+			.unwrap()
+	}
+
+	fn transfer(nonce: u64) -> Extrinsic {
+		Transfer {
+			from: Sr25519Keyring::Alice.into(),
+			to: Sr25519Keyring::Bob.into(),
+			amount: 69,
+			nonce,
+		}
+		.into_unchecked_extrinsic()
+	}
+
+	fn proof_of(builder: BlockBuilder<'_, TestBlock, TestClient>) -> sp_api::StorageProof {
+		let recorder = builder.proof_recorder().expect("Proof recording is enabled; qed");
+		builder.build().unwrap();
+		recorder.drain_storage_proof()
+	}
+
+	fn balance(builder: &BlockBuilder<'_, TestBlock, TestClient>, who: Sr25519Keyring) -> u64 {
+		let parent = builder.parent_hash;
+		builder.read_with(|api| api.balance_of(parent, who.into()).unwrap())
+	}
+
+	fn account_key(who: Sr25519Keyring) -> Vec<u8> {
+		let who: sp_core::crypto::AccountId32 = who.into();
+		let mut key = sp_core::twox_128(b"System").to_vec();
+		key.extend(sp_core::twox_128(b"Account"));
+		key.extend(sp_core::blake2_128(who.as_ref()));
+		key.extend(who.as_ref() as &[u8]);
+		key
+	}
+
+	fn change_of(
+		changes: &TransactionChanges,
+		key: &[u8],
+	) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+		changes
+			.changes
+			.iter()
+			.find(|c| c.key == key)
+			.map(|c| (c.pre.clone(), c.post.clone()))
+	}
+
+	#[test]
+	fn changes_should_list_sender_and_receiver_accounts_when_transfer_applied() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let (alice, bob) = (account_key(Sr25519Keyring::Alice), account_key(Sr25519Keyring::Bob));
+		let (alice_pre, bob_pre) =
+			(stored(&builder.isolated(), &alice), stored(&builder.isolated(), &bob));
+
+		let mut seen = None;
+		builder
+			.push_with(transfer(0), |iso| {
+				seen = Some((
+					iso.top_changes(&|_| true).unwrap(),
+					stored(iso, &alice),
+					stored(iso, &bob),
+				));
+				false
+			})
+			.unwrap();
+		let (changes, alice_post, bob_post) = seen.unwrap();
+
+		assert_eq!(change_of(&changes, &alice), Some((alice_pre, alice_post)));
+		assert_eq!(change_of(&changes, &bob), Some((bob_pre, bob_post)));
+		assert!(changes.changes.iter().all(|c| c.pre != c.post));
+	}
+
+	#[test]
+	fn changes_should_carry_earlier_extrinsic_value_as_pre_when_key_written_earlier_in_block() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let bob = account_key(Sr25519Keyring::Bob);
+		builder.push(transfer(0)).unwrap();
+		let after_first = stored(&builder.isolated(), &bob);
+
+		let mut seen = None;
+		builder
+			.push_with(transfer(1), |iso| {
+				seen = Some(iso.top_changes(&|_| true).unwrap());
+				true
+			})
+			.unwrap();
+
+		assert_eq!(
+			change_of(&seen.unwrap(), &bob),
+			Some((after_first, stored(&builder.isolated(), &bob)))
+		);
+	}
+
+	#[test]
+	fn changes_should_resolve_when_keep_calls_into_the_same_api() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let bob = account_key(Sr25519Keyring::Bob);
+
+		let mut seen = None;
+		builder
+			.push_with(transfer(0), |iso| {
+				seen = Some(iso.top_changes(&|key| iso.read(|_| key == &bob[..])).unwrap());
+				false
+			})
+			.unwrap();
+
+		let changes = seen.unwrap();
+		assert_eq!(changes.changes.iter().map(|c| c.key.clone()).collect::<Vec<_>>(), vec![bob]);
+	}
+
+	#[test]
+	fn changes_should_report_key_as_appended_when_extrinsic_appends_over_earlier_append() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let events = [sp_core::twox_128(b"System"), sp_core::twox_128(b"Events")].concat();
+		builder.push(transfer(0)).unwrap();
+
+		let mut seen = None;
+		builder
+			.push_with(transfer(1), |iso| {
+				seen = Some(iso.top_changes(&|key| key == &events[..]).unwrap());
+				false
+			})
+			.unwrap();
+
+		assert_eq!(seen.unwrap(), TransactionChanges { changes: vec![], appended: vec![events] });
+	}
+
+	#[test]
+	fn changes_should_be_empty_when_no_extrinsic_is_being_decided() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		builder.push(transfer(0)).unwrap();
+
+		assert_eq!(
+			builder.isolated().top_changes(&|_| true).unwrap(),
+			TransactionChanges::default()
+		);
+	}
+
+	#[test]
+	fn push_with_should_leave_proof_unchanged_when_decide_reads_changes() {
+		let client = substrate_test_runtime_client::new();
+
+		let mut read = new_builder(&client);
+		read.push_with(transfer(0), |iso| iso.top_changes(&|_| true).is_ok()).unwrap();
+
+		let mut plain = new_builder(&client);
+		plain.push(transfer(0)).unwrap();
+
+		assert_eq!(proof_of(read), proof_of(plain));
+	}
+
+	#[test]
+	fn push_with_should_commit_when_decide_returns_true() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let bob_before = balance(&builder, Sr25519Keyring::Bob);
+
+		let xt = transfer(0);
+
+		assert_eq!(builder.push_with(xt.clone(), |_| true).unwrap(), true);
+
+		assert_eq!(balance(&builder, Sr25519Keyring::Bob), bob_before + 69);
+		assert_eq!(builder.build().unwrap().block.extrinsics, vec![xt]);
+	}
+
+	#[test]
+	fn push_with_should_roll_back_state_when_decide_returns_false() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let bob_before = balance(&builder, Sr25519Keyring::Bob);
+
+		let xt = transfer(0);
+
+		assert_eq!(builder.push_with(xt.clone(), |_| false).unwrap(), false);
+
+		assert_eq!(balance(&builder, Sr25519Keyring::Bob), bob_before);
+		builder.push(xt.clone()).unwrap();
+		assert_eq!(builder.build().unwrap().block.extrinsics, vec![xt]);
+	}
+
+	#[test]
+	fn push_with_should_let_decide_see_post_execution_state_when_extrinsic_applied() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let parent = builder.parent_hash;
+		let bob_before = balance(&builder, Sr25519Keyring::Bob);
+
+		let mut seen = 0;
+		builder
+			.push_with(transfer(0), |iso| {
+				seen = iso.read(|api| api.balance_of(parent, Sr25519Keyring::Bob.into()).unwrap());
+				false
+			})
+			.unwrap();
+
+		assert_eq!(seen, bob_before + 69);
+	}
+
+	#[test]
+	fn push_with_should_leave_proof_unchanged_when_decide_returns_false() {
+		let client = substrate_test_runtime_client::new();
+
+		let mut rejected = new_builder(&client);
+		rejected.push_with(transfer(0), |_| false).unwrap();
+
+		assert_eq!(proof_of(rejected), proof_of(new_builder(&client)));
+	}
+
+	#[test]
+	fn push_with_should_produce_include_once_proof_when_simulated_then_pushed() {
+		let client = substrate_test_runtime_client::new();
+
+		let mut simulated = new_builder(&client);
+		simulated.push_with(transfer(0), |_| false).unwrap();
+		simulated.push(transfer(0)).unwrap();
+
+		let mut plain = new_builder(&client);
+		plain.push(transfer(0)).unwrap();
+
+		assert_eq!(proof_of(simulated), proof_of(plain));
+	}
+
+	#[test]
+	fn read_with_should_not_add_keys_to_proof_when_closure_reads_storage() {
+		let client = substrate_test_runtime_client::new();
+
+		let read = new_builder(&client);
+		balance(&read, Sr25519Keyring::Charlie);
+		let mut unread = new_builder(&client);
+		unread.push(transfer(0)).unwrap();
+		let mut read_then_push = read;
+		read_then_push.push(transfer(0)).unwrap();
+
+		assert_eq!(proof_of(read_then_push), proof_of(unread));
+	}
+
+	#[test]
+	fn read_with_should_not_persist_writes_when_closure_writes_storage() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let parent = builder.parent_hash;
+		let bob_before = balance(&builder, Sr25519Keyring::Bob);
+
+		let applied = builder.read_with(|api| api.apply_extrinsic(parent, transfer(0)).unwrap());
+
+		assert!(matches!(applied, Ok(Ok(()))));
+		assert_eq!(balance(&builder, Sr25519Keyring::Bob), bob_before);
+		builder.push(transfer(0)).unwrap();
+		assert_eq!(balance(&builder, Sr25519Keyring::Bob), bob_before + 69);
+	}
+
+	#[test]
+	fn nested_read_inside_committing_push_with_should_not_add_keys_to_proof() {
+		let client = substrate_test_runtime_client::new();
+
+		let mut guarded = new_builder(&client);
+		let parent = guarded.parent_hash;
+		guarded
+			.push_with(transfer(0), |iso| {
+				iso.read(|api| api.balance_of(parent, Sr25519Keyring::Charlie.into()).unwrap());
+				true
+			})
+			.unwrap();
+
+		let mut plain = new_builder(&client);
+		plain.push(transfer(0)).unwrap();
+
+		let mut leaky = new_builder(&client);
+		leaky.push(transfer(0)).unwrap();
+		leaky.api.balance_of(parent, Sr25519Keyring::Charlie.into()).unwrap();
+
+		let plain = proof_of(plain);
+		assert_ne!(proof_of(leaky), plain);
+		assert_eq!(proof_of(guarded), plain);
+	}
+
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic(expected = "`decide` must not add to the storage proof")]
+	fn push_with_should_panic_in_debug_when_decide_changes_recorder_size() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		let parent = builder.parent_hash;
+
+		let _ = builder.push_with(transfer(0), |iso| {
+			iso.api.balance_of(parent, Sr25519Keyring::Charlie.into()).unwrap();
+			true
+		});
+	}
+
+	#[test]
+	fn nested_read_should_keep_node_in_proof_when_earlier_committed_tx_recorded_it() {
+		let client = substrate_test_runtime_client::new();
+		let bob_transfer = |nonce| {
+			Transfer {
+				from: Sr25519Keyring::Bob.into(),
+				to: Sr25519Keyring::Charlie.into(),
+				amount: 1,
+				nonce,
+			}
+			.into_unchecked_extrinsic()
+		};
+
+		let mut guarded = new_builder(&client);
+		let parent = guarded.parent_hash;
+		guarded.push(transfer(0)).unwrap();
+		guarded
+			.push_with(bob_transfer(0), |iso| {
+				iso.read(|api| api.balance_of(parent, Sr25519Keyring::Alice.into()).unwrap());
+				true
+			})
+			.unwrap();
+
+		let mut plain = new_builder(&client);
+		plain.push(transfer(0)).unwrap();
+		plain.push(bob_transfer(0)).unwrap();
+
+		assert_eq!(proof_of(guarded), proof_of(plain));
+	}
+
+	#[test]
+	fn estimate_block_size_should_be_unchanged_when_guarded_push_rolls_back() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		builder.push(transfer(0)).unwrap();
+		let before = builder.estimate_block_size();
+
+		builder.push_with(transfer(1), |_| false).unwrap();
+
+		assert_eq!(builder.estimate_block_size(), before);
+	}
+
+	fn set(key: &[u8], value: Option<&[u8]>) -> Extrinsic {
+		ExtrinsicBuilder::new_storage_change(key.to_vec(), value.map(|v| v.to_vec())).build()
+	}
+
+	fn stored(
+		iso: &Isolated<'_, TestBlock, <TestClient as ProvideRuntimeApi<TestBlock>>::Api>,
+		key: &[u8],
+	) -> Option<Vec<u8>> {
+		iso.storage(key, |v| v.map(|v| v.to_vec())).unwrap()
+	}
+
+	#[test]
+	fn isolated_storage_should_return_post_state_when_called_in_decide() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+
+		let mut seen = None;
+		builder
+			.push_with(set(b"guard", Some(b"post")), |iso| {
+				seen = stored(iso, b"guard");
+				false
+			})
+			.unwrap();
+
+		assert_eq!(seen, Some(b"post".to_vec()));
+		assert_eq!(stored(&builder.isolated(), b"guard"), None);
+	}
+
+	#[test]
+	fn isolated_storage_should_return_none_when_key_is_deleted_in_overlay() {
+		let client = substrate_test_runtime_client::new();
+		let mut builder = new_builder(&client);
+		builder.push(set(b"guard", Some(b"pre"))).unwrap();
+
+		let mut seen = Some(Vec::new());
+		builder
+			.push_with(set(b"guard", None), |iso| {
+				seen = stored(iso, b"guard");
+				false
+			})
+			.unwrap();
+
+		assert_eq!(seen, None);
+		assert_eq!(stored(&builder.isolated(), b"guard"), Some(b"pre".to_vec()));
+	}
+
+	#[test]
+	fn isolated_storage_should_read_parent_state_when_key_is_not_in_overlay() {
+		let client = substrate_test_runtime_client::new();
+		let builder = new_builder(&client);
+		let parent = client.state_at(client.info().best_hash).unwrap();
+
+		assert_eq!(
+			stored(&builder.isolated(), sp_core::storage::well_known_keys::CODE),
+			parent.storage(sp_core::storage::well_known_keys::CODE).unwrap(),
+		);
+	}
+
+	#[test]
+	fn isolated_storage_should_not_add_keys_to_proof_when_reading_parent_state() {
+		let client = substrate_test_runtime_client::new();
+
+		let mut read = new_builder(&client);
+		read.push_with(transfer(0), |iso| {
+			stored(iso, sp_core::storage::well_known_keys::CODE).is_some()
+		})
+		.unwrap();
+		let mut unread = new_builder(&client);
+		unread.push(transfer(0)).unwrap();
+
+		assert_eq!(proof_of(read), proof_of(unread));
 	}
 }
