@@ -156,8 +156,7 @@ impl StorageEntry {
 	}
 
 	/// Materialize the internal state.
-	#[cfg(test)]
-	pub(crate) fn materialize(&self) -> Option<alloc::borrow::Cow<[u8]>> {
+	pub(crate) fn materialize(&self) -> Option<alloc::borrow::Cow<'_, [u8]>> {
 		use alloc::borrow::Cow;
 
 		match self {
@@ -177,6 +176,17 @@ impl StorageEntry {
 			StorageEntry::Set(e) => Some(Cow::Borrowed(e.as_ref())),
 		}
 	}
+}
+
+/// What a key held before the innermost open transaction wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorValue {
+	/// Written earlier in the overlay; `None` means removed.
+	Overlay(Option<StorageValue>),
+	/// Not in the overlay below: the backend's value.
+	Backend,
+	/// Appended to: its earlier value was moved into the current layer and can't be recovered.
+	Appended,
 }
 
 /// Change set for basic key value with extrinsics index recording and removal support.
@@ -707,6 +717,47 @@ impl<K: Ord + Hash + Clone, V> OverlayedMap<K, V> {
 }
 
 impl OverlayedChangeSet {
+	/// Keys written in the innermost open transaction. Empty when no transaction is open.
+	pub fn current_transaction_keys(&self) -> Vec<StorageKey> {
+		self.dirty_keys
+			.last()
+			.map(|dirty| dirty.iter().cloned().collect())
+			.unwrap_or_default()
+	}
+
+	/// Keys written in the innermost open transaction with their prior and current value, ordered
+	/// by key. Empty when no transaction is open.
+	pub fn current_transaction_changes(
+		&self,
+		keep: impl Fn(&[u8]) -> bool,
+	) -> Vec<(StorageKey, PriorValue, Option<StorageValue>)> {
+		let Some(dirty) = self.dirty_keys.last() else { return Vec::new() };
+		let mut out: Vec<_> = dirty
+			.iter()
+			.filter(|key| keep(key))
+			.map(|key| {
+				let txs = &self
+					.changes
+					.get(key)
+					.expect("A key in a dirty set always has an overlayed value; qed")
+					.transactions;
+				let current = &txs[txs.len() - 1].value;
+				let prior = match current {
+					// The value can be the whole block's appends so far; callers can't use it.
+					StorageEntry::Append { parent_size: Some(_), .. } =>
+						return (key.clone(), PriorValue::Appended, None),
+					_ if txs.len() == 1 => PriorValue::Backend,
+					_ => PriorValue::Overlay(
+						txs[txs.len() - 2].value.materialize().map(|v| v.into_owned()),
+					),
+				};
+				(key.clone(), prior, current.materialize().map(|v| v.into_owned()))
+			})
+			.collect();
+		out.sort_by(|a, b| a.0.cmp(&b.0));
+		out
+	}
+
 	/// Rollback the last transaction started by `start_transaction`.
 	///
 	/// Any changes made during that transaction are discarded. Returns an error if
@@ -1421,5 +1472,142 @@ mod test {
 
 		let encoded = changeset.get(&key).unwrap().value().unwrap();
 		assert_eq!(&initial_data, encoded);
+	}
+
+	fn val(v: &[u8]) -> Option<StorageValue> {
+		Some(v.to_vec())
+	}
+
+	#[test]
+	fn current_transaction_changes_should_be_empty_when_no_transaction_is_open() {
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.set(b"key0".to_vec(), val(b"val0"), None);
+
+		assert_eq!(changeset.current_transaction_changes(|_| true), vec![]);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_list_only_innermost_writes_when_transactions_nest() {
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.set(b"committed".to_vec(), val(b"c0"), None);
+		changeset.start_transaction();
+		changeset.set(b"outer".to_vec(), val(b"o0"), None);
+		changeset.start_transaction();
+		changeset.set(b"new".to_vec(), val(b"n1"), None);
+		changeset.set(b"outer".to_vec(), val(b"o1"), None);
+		changeset.set(b"committed".to_vec(), None, None);
+
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![
+				(b"committed".to_vec(), PriorValue::Overlay(val(b"c0")), None),
+				(b"new".to_vec(), PriorValue::Backend, val(b"n1")),
+				(b"outer".to_vec(), PriorValue::Overlay(val(b"o0")), val(b"o1")),
+			]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_include_nested_writes_when_inner_transaction_committed() {
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.set(b"key".to_vec(), val(b"v0"), None);
+		changeset.start_transaction();
+		changeset.start_transaction();
+		changeset.set(b"key".to_vec(), val(b"v1"), None);
+		changeset.set(b"inner".to_vec(), val(b"i1"), None);
+		changeset.commit_transaction().unwrap();
+
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![
+				(b"inner".to_vec(), PriorValue::Backend, val(b"i1")),
+				(b"key".to_vec(), PriorValue::Overlay(val(b"v0")), val(b"v1")),
+			]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_exclude_nested_writes_when_inner_transaction_rolled_back()
+	{
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.start_transaction();
+		changeset.set(b"kept".to_vec(), val(b"k1"), None);
+		changeset.start_transaction();
+		changeset.set(b"dropped".to_vec(), val(b"d1"), None);
+		changeset.set(b"kept".to_vec(), val(b"k2"), None);
+		changeset.rollback_transaction().unwrap();
+
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![(b"kept".to_vec(), PriorValue::Backend, val(b"k1"))]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_mark_key_appended_when_appended_on_top_of_earlier_append()
+	{
+		use codec::Encode;
+		let init = || vec![0u8];
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.append_storage(b"list".to_vec(), b"a".to_vec().encode(), init, None);
+		changeset.start_transaction();
+		changeset.append_storage(b"list".to_vec(), b"b".to_vec().encode(), init, None);
+
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![(b"list".to_vec(), PriorValue::Appended, None)]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_materialize_full_list_when_appending_over_earlier_set() {
+		use codec::Encode;
+		let mut changeset = OverlayedChangeSet::default();
+		let before = vec![7u8; 63];
+		changeset.set(b"list".to_vec(), Some(before.encode()), None);
+		changeset.start_transaction();
+		changeset.append_storage(b"list".to_vec(), 9u8.encode(), Default::default, None);
+
+		let mut after = before.clone();
+		after.push(9);
+		assert_eq!(after.encode()[..2], [0x01, 0x01]);
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![(
+				b"list".to_vec(),
+				PriorValue::Overlay(Some(before.encode())),
+				Some(after.encode())
+			)]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_materialize_full_list_when_appending_over_backend_value()
+	{
+		use codec::Encode;
+		let mut changeset = OverlayedChangeSet::default();
+		let backend = vec![7u8; 63];
+		changeset.start_transaction();
+		changeset.append_storage(b"list".to_vec(), 9u8.encode(), || backend.encode(), None);
+
+		let mut after = backend.clone();
+		after.push(9);
+		assert_eq!(
+			changeset.current_transaction_changes(|_| true),
+			vec![(b"list".to_vec(), PriorValue::Backend, Some(after.encode()))]
+		);
+	}
+
+	#[test]
+	fn current_transaction_changes_should_skip_key_when_filter_rejects_it() {
+		let mut changeset = OverlayedChangeSet::default();
+		changeset.start_transaction();
+		changeset.set(b"kept".to_vec(), val(b"k1"), None);
+		changeset.set(b"skipped".to_vec(), val(b"s1"), None);
+
+		assert_eq!(
+			changeset.current_transaction_changes(|k| k == b"kept"),
+			vec![(b"kept".to_vec(), PriorValue::Backend, val(b"k1"))]
+		);
 	}
 }

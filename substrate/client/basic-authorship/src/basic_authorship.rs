@@ -29,7 +29,7 @@ use futures::{
 use log::{debug, error, info, trace, warn};
 use sc_block_builder::{BlockBuilderApi, BlockBuilderBuilder};
 use sc_telemetry::{telemetry, TelemetryHandle, CONSENSUS_INFO};
-use sc_transaction_pool_api::{InPoolTransaction, TransactionPool, TxInvalidityReportMap};
+use sc_transaction_pool_api::{InPoolTransaction, TransactionPool, TxHash, TxInvalidityReportMap};
 use sp_api::{ApiExt, CallApiAt, ProvideRuntimeApi};
 use sp_blockchain::{ApplyExtrinsicFailed::Validity, Error::ApplyExtrinsicFailed, HeaderBackend};
 use sp_consensus::{DisableProofRecording, EnableProofRecording, ProofRecording, Proposal};
@@ -43,6 +43,10 @@ use std::{marker::PhantomData, pin::Pin, sync::Arc, time};
 
 use prometheus_endpoint::Registry as PrometheusRegistry;
 use sc_proposer_metrics::{EndProposingReason, MetricsLink as PrometheusMetrics};
+
+use crate::guard::{ExtrinsicGuard, GuardContext, GuardOutcome};
+
+type SharedGuard<A, C> = Arc<dyn ExtrinsicGuard<<A as TransactionPool>::Block, C, TxHash<A>>>;
 
 /// Default block size limit in bytes used by [`Proposer`].
 ///
@@ -58,7 +62,7 @@ const DEFAULT_SOFT_DEADLINE_PERCENT: Percent = Percent::from_percent(50);
 const LOG_TARGET: &'static str = "basic-authorship";
 
 /// [`Proposer`] factory.
-pub struct ProposerFactory<A, C, PR> {
+pub struct ProposerFactory<A: TransactionPool, C, PR> {
 	spawn_handle: Box<dyn SpawnNamed>,
 	/// The client instance.
 	client: Arc<C>,
@@ -82,11 +86,13 @@ pub struct ProposerFactory<A, C, PR> {
 	telemetry: Option<TelemetryHandle>,
 	/// When estimating the block size, should the proof be included?
 	include_proof_in_block_size_estimation: bool,
+	/// Decides per pool transaction whether it is pushed.
+	guard: Option<SharedGuard<A, C>>,
 	/// phantom member to pin the `ProofRecording` type.
 	_phantom: PhantomData<PR>,
 }
 
-impl<A, C, PR> Clone for ProposerFactory<A, C, PR> {
+impl<A: TransactionPool, C, PR> Clone for ProposerFactory<A, C, PR> {
 	fn clone(&self) -> Self {
 		Self {
 			spawn_handle: self.spawn_handle.clone(),
@@ -97,12 +103,13 @@ impl<A, C, PR> Clone for ProposerFactory<A, C, PR> {
 			soft_deadline_percent: self.soft_deadline_percent,
 			telemetry: self.telemetry.clone(),
 			include_proof_in_block_size_estimation: self.include_proof_in_block_size_estimation,
+			guard: self.guard.clone(),
 			_phantom: self._phantom,
 		}
 	}
 }
 
-impl<A, C> ProposerFactory<A, C, DisableProofRecording> {
+impl<A: TransactionPool, C> ProposerFactory<A, C, DisableProofRecording> {
 	/// Create a new proposer factory.
 	///
 	/// Proof recording will be disabled when using proposers built by this instance to build
@@ -123,12 +130,13 @@ impl<A, C> ProposerFactory<A, C, DisableProofRecording> {
 			telemetry,
 			client,
 			include_proof_in_block_size_estimation: false,
+			guard: None,
 			_phantom: PhantomData,
 		}
 	}
 }
 
-impl<A, C> ProposerFactory<A, C, EnableProofRecording> {
+impl<A: TransactionPool, C> ProposerFactory<A, C, EnableProofRecording> {
 	/// Create a new proposer factory with proof recording enabled.
 	///
 	/// Each proposer created by this instance will record a proof while building a block.
@@ -151,6 +159,7 @@ impl<A, C> ProposerFactory<A, C, EnableProofRecording> {
 			soft_deadline_percent: DEFAULT_SOFT_DEADLINE_PERCENT,
 			telemetry,
 			include_proof_in_block_size_estimation: true,
+			guard: None,
 			_phantom: PhantomData,
 		}
 	}
@@ -161,7 +170,7 @@ impl<A, C> ProposerFactory<A, C, EnableProofRecording> {
 	}
 }
 
-impl<A, C, PR> ProposerFactory<A, C, PR> {
+impl<A: TransactionPool, C, PR> ProposerFactory<A, C, PR> {
 	/// Set the default block size limit in bytes.
 	///
 	/// The default value for the block size limit is:
@@ -187,6 +196,13 @@ impl<A, C, PR> ProposerFactory<A, C, PR> {
 	/// are being tried with no success, hence block producer ends up creating an empty block.
 	pub fn set_soft_deadline(&mut self, percent: Percent) {
 		self.soft_deadline_percent = percent;
+	}
+
+	/// Install a guard that every proposer created by this factory hands its pool transactions
+	/// to instead of pushing them directly.
+	pub fn with_extrinsic_guard(mut self, guard: SharedGuard<A, C>) -> Self {
+		self.guard = Some(guard);
+		self
 	}
 }
 
@@ -223,6 +239,7 @@ where
 			telemetry: self.telemetry.clone(),
 			_phantom: PhantomData,
 			include_proof_in_block_size_estimation: self.include_proof_in_block_size_estimation,
+			guard: self.guard.clone(),
 		};
 
 		proposer
@@ -259,6 +276,7 @@ pub struct Proposer<Block: BlockT, C, A: TransactionPool, PR> {
 	include_proof_in_block_size_estimation: bool,
 	soft_deadline_percent: Percent,
 	telemetry: Option<TelemetryHandle>,
+	guard: Option<SharedGuard<A, C>>,
 	_phantom: PhantomData<PR>,
 }
 
@@ -421,6 +439,14 @@ where
 
 		let block_size_limit = block_size_limit.unwrap_or(self.default_block_size_limit);
 
+		let mut guard_session = self.guard.as_ref().map(|guard| {
+			guard.start(GuardContext {
+				parent_hash: self.parent_hash,
+				parent_number: self.parent_number,
+				deadline,
+			})
+		});
+
 		debug!(target: LOG_TARGET, "Attempting to push transactions from the pool at {:?}.", self.parent_hash);
 		let mut transaction_pushed = false;
 
@@ -480,10 +506,26 @@ where
 			}
 
 			trace!(target: LOG_TARGET, "[{:?}] Pushing to the block.", pending_tx_hash);
-			match sc_block_builder::BlockBuilder::push(block_builder, pending_tx_data) {
-				Ok(()) => {
+			let pushed = match guard_session.as_mut() {
+				Some(session) => session.apply(block_builder, pending_tx_data, &pending_tx_hash),
+				None => sc_block_builder::BlockBuilder::push(block_builder, pending_tx_data)
+					.map(|()| GuardOutcome::Pushed),
+			};
+			match pushed {
+				Ok(GuardOutcome::Pushed) => {
 					transaction_pushed = true;
 					trace!(target: LOG_TARGET, "[{:?}] Pushed to the block.", pending_tx_hash);
+				},
+				Ok(GuardOutcome::Skipped) => {
+					pending_iterator.report_invalid(&pending_tx);
+					trace!(target: LOG_TARGET, "[{:?}] Skipped by the extrinsic guard.", pending_tx_hash);
+				},
+				Ok(GuardOutcome::Stop) => {
+					debug!(
+						target: LOG_TARGET,
+						"Extrinsic guard ran out of time, proceeding with proposing."
+					);
+					break EndProposingReason::HitDeadline
 				},
 				Err(ApplyExtrinsicFailed(Validity(e))) if e.exhausted_resources() => {
 					pending_iterator.report_invalid(&pending_tx);
@@ -613,6 +655,7 @@ mod tests {
 	use sp_blockchain::HeaderBackend;
 	use sp_consensus::{BlockOrigin, Environment, Proposer};
 	use sp_runtime::{generic::BlockId, traits::NumberFor, Perbill};
+	use std::collections::HashSet;
 	use substrate_test_runtime_client::{
 		prelude::*,
 		runtime::{Block as TestBlock, Extrinsic, ExtrinsicBuilder, Transfer},
@@ -1157,5 +1200,233 @@ mod tests {
 			cell2.lock().0 > MAX_SKIPPED_TRANSACTIONS,
 			"Not enough calls to current time, which indicates the test might have ended because of deadline, not soft deadline"
 		);
+	}
+
+	struct TestGuard {
+		skip: HashSet<sp_core::H256>,
+		stop_at: Option<usize>,
+		started: Mutex<Vec<sp_core::H256>>,
+	}
+
+	impl TestGuard {
+		fn new(skip: impl IntoIterator<Item = sp_core::H256>, stop_at: Option<usize>) -> Arc<Self> {
+			Arc::new(Self {
+				skip: skip.into_iter().collect(),
+				stop_at,
+				started: Mutex::new(vec![]),
+			})
+		}
+	}
+
+	struct TestSession<'a> {
+		guard: &'a TestGuard,
+		seen: usize,
+	}
+
+	impl ExtrinsicGuard<TestBlock, TestClient, sp_core::H256> for TestGuard {
+		fn start(
+			&self,
+			ctx: GuardContext<TestBlock>,
+		) -> Box<dyn crate::GuardSession<TestBlock, TestClient, sp_core::H256> + Send + '_> {
+			self.started.lock().push(ctx.parent_hash);
+			Box::new(TestSession { guard: self, seen: 0 })
+		}
+	}
+
+	impl crate::GuardSession<TestBlock, TestClient, sp_core::H256> for TestSession<'_> {
+		fn apply(
+			&mut self,
+			bb: &mut sc_block_builder::BlockBuilder<'_, TestBlock, TestClient>,
+			xt: Extrinsic,
+			hash: &sp_core::H256,
+		) -> Result<GuardOutcome, sp_blockchain::Error> {
+			self.seen += 1;
+			if Some(self.seen) == self.guard.stop_at {
+				return Ok(GuardOutcome::Stop)
+			}
+			if self.guard.skip.contains(hash) {
+				return Ok(GuardOutcome::Skipped)
+			}
+			bb.push(xt).map(|()| GuardOutcome::Pushed)
+		}
+	}
+
+	fn tiny_from(who: u32, nonce: u64) -> Extrinsic {
+		ExtrinsicBuilder::new_fill_block(Perbill::from_parts(TINY))
+			.signer(Sr25519Keyring::numeric(who as usize))
+			.nonce(nonce)
+			.build()
+	}
+
+	fn pool_with(
+		client: &Arc<TestClient>,
+		xts: Vec<Extrinsic>,
+	) -> Arc<BasicPool<sc_transaction_pool::FullChainApi<TestClient, TestBlock>, TestBlock>> {
+		let spawner = sp_core::testing::TaskExecutor::new();
+		let txpool = Arc::from(BasicPool::new_full(
+			Default::default(),
+			true.into(),
+			None,
+			spawner,
+			client.clone(),
+		));
+		let genesis_hash = client.info().genesis_hash;
+		block_on(txpool.submit_at(genesis_hash, SOURCE, xts)).unwrap();
+		block_on(txpool.maintain(chain_event(
+			client.expect_header(genesis_hash).expect("there should be header"),
+		)));
+		txpool
+	}
+
+	fn propose_guarded(
+		client: &Arc<TestClient>,
+		txpool: &Arc<
+			BasicPool<sc_transaction_pool::FullChainApi<TestClient, TestBlock>, TestBlock>,
+		>,
+		guard: Arc<TestGuard>,
+	) -> TestBlock {
+		let mut factory = ProposerFactory::new(
+			sp_core::testing::TaskExecutor::new(),
+			client.clone(),
+			txpool.clone(),
+			None,
+			None,
+		)
+		.with_extrinsic_guard(guard);
+		let proposer =
+			block_on(factory.init(&client.expect_header(client.info().genesis_hash).unwrap()))
+				.unwrap();
+		block_on(proposer.propose(
+			Default::default(),
+			Default::default(),
+			time::Duration::from_secs(60),
+			None,
+		))
+		.map(|r| r.block)
+		.unwrap()
+	}
+
+	#[test]
+	fn apply_extrinsics_should_keep_tx_in_pool_when_guard_skips() {
+		let client = Arc::new(substrate_test_runtime_client::new());
+		let (first, second) = (extrinsic(0), extrinsic(1));
+		let txpool = pool_with(&client, vec![first.clone(), second]);
+		let held = txpool.hash_of(&first);
+
+		let block = propose_guarded(&client, &txpool, TestGuard::new([held], None));
+
+		assert_eq!(block.extrinsics().len(), 0);
+		assert_eq!(txpool.ready().count(), 2);
+	}
+
+	#[test]
+	fn apply_extrinsics_should_skip_dependents_only_when_held_tx_has_later_nonces() {
+		let client = Arc::new(substrate_test_runtime_client::new());
+		let (held_xt, dependent, unrelated) = (tiny_from(1, 0), tiny_from(1, 1), tiny_from(2, 0));
+		let txpool = pool_with(&client, vec![held_xt.clone(), dependent, unrelated.clone()]);
+		let held = txpool.hash_of(&held_xt);
+
+		let block = propose_guarded(&client, &txpool, TestGuard::new([held], None));
+
+		assert_eq!(block.extrinsics().to_vec(), vec![unrelated]);
+		assert_eq!(txpool.ready().count(), 3);
+	}
+
+	#[test]
+	fn apply_extrinsics_should_not_count_guard_skips_towards_max_skipped_when_many_held() {
+		let client = Arc::new(substrate_test_runtime_client::new());
+		let huge = |who: usize| {
+			ExtrinsicBuilder::new_fill_block(Perbill::from_parts(HUGE))
+				.signer(Sr25519Keyring::numeric(who))
+				.build()
+		};
+		let held: Vec<Extrinsic> =
+			(0..MAX_SKIPPED_TRANSACTIONS as u32 + 2).map(|w| tiny_from(w, 0)).collect();
+		let fine: Vec<Extrinsic> = (10..13).map(|w| tiny_from(w, 0)).collect();
+		let txpool = pool_with(
+			&client,
+			held.iter()
+				.cloned()
+				.chain([huge(13), huge(14)])
+				.chain(fine.iter().cloned())
+				.collect(),
+		);
+		let guard = TestGuard::new(held.iter().map(|xt| txpool.hash_of(xt)), None);
+		assert_eq!(txpool.ready().count(), held.len() + 2 + fine.len());
+
+		let mut factory = ProposerFactory::new(
+			sp_core::testing::TaskExecutor::new(),
+			client.clone(),
+			txpool.clone(),
+			None,
+			None,
+		)
+		.with_extrinsic_guard(guard);
+		let deadline = time::Duration::from_secs(600);
+		let cell = Mutex::new((0, time::Instant::now()));
+		let proposer = factory.init_with_now(
+			&client.expect_header(client.info().genesis_hash).unwrap(),
+			Box::new(move || {
+				let mut value = cell.lock();
+				let (called, old) = *value;
+				let increase =
+					if called == 1 { deadline / 2 } else { time::Duration::from_millis(0) };
+				*value = (called + 1, old + increase);
+				old
+			}),
+		);
+		let block =
+			block_on(proposer.propose(Default::default(), Default::default(), deadline, None))
+				.map(|r| r.block)
+				.unwrap();
+
+		assert_eq!(block.extrinsics().len(), 1 + fine.len());
+		assert!(fine.iter().all(|xt| block.extrinsics().contains(xt)));
+	}
+
+	#[test]
+	fn apply_extrinsics_should_finalize_partial_block_when_guard_returns_stop() {
+		let client = Arc::new(substrate_test_runtime_client::new());
+		let txpool = pool_with(&client, vec![tiny_from(1, 0), tiny_from(2, 0), tiny_from(3, 0)]);
+
+		let block = propose_guarded(&client, &txpool, TestGuard::new([], Some(2)));
+
+		assert_eq!(block.extrinsics().len(), 1);
+		assert_eq!(txpool.ready().count(), 3);
+	}
+
+	#[test]
+	fn apply_extrinsics_should_create_fresh_session_when_proposals_overlap() {
+		let client = Arc::new(substrate_test_runtime_client::new());
+		let txpool = pool_with(&client, vec![tiny_from(1, 0), tiny_from(2, 0)]);
+		let guard = TestGuard::new([], Some(2));
+		let genesis = client.expect_header(client.info().genesis_hash).unwrap();
+		let mut factory = ProposerFactory::new(
+			sp_core::testing::TaskExecutor::new(),
+			client.clone(),
+			txpool.clone(),
+			None,
+			None,
+		)
+		.with_extrinsic_guard(guard.clone());
+
+		let first = block_on(factory.init(&genesis)).unwrap();
+		let second = block_on(factory.init(&genesis)).unwrap();
+		let propose = |p: crate::Proposer<_, _, _, _>| {
+			block_on(p.propose(
+				Default::default(),
+				Default::default(),
+				time::Duration::from_secs(60),
+				None,
+			))
+			.map(|r| r.block)
+			.unwrap()
+		};
+		let (a, b) = (propose(first), propose(second));
+
+		// `stop_at` counts per session, so each proposal stops at its own second tx.
+		assert_eq!(a.extrinsics().len(), 1);
+		assert_eq!(b.extrinsics().len(), 1);
+		assert_eq!(*guard.started.lock(), vec![genesis.hash(), genesis.hash()]);
 	}
 }

@@ -84,8 +84,8 @@ pub mod __private {
 		pub use sp_externalities::{Extension, Extensions};
 		pub use sp_runtime::StateVersion;
 		pub use sp_state_machine::{
-			Backend as StateBackend, InMemoryBackend, OverlayedChanges, StorageProof, TrieBackend,
-			TrieBackendBuilder,
+			Backend as StateBackend, InMemoryBackend, OverlayedChanges, PriorValue, StorageProof,
+			TrieBackend, TrieBackendBuilder,
 		};
 	}
 	#[cfg(feature = "std")]
@@ -642,6 +642,53 @@ pub trait ApiExt<Block: BlockT> {
 
 	/// Register an [`Extension`] that will be accessible while executing a runtime api call.
 	fn register_extension<E: Extension>(&mut self, extension: E);
+
+	/// Read `key` natively from the changes made by this instance on top of the state `at`, and
+	/// pass the value to `f`.
+	///
+	/// No runtime call is made and the proof recorder is not touched. `f` must not call back into
+	/// this instance.
+	fn read_storage<R, F: FnOnce(Option<&[u8]>) -> R>(
+		&self,
+		at: Block::Hash,
+		key: &[u8],
+		f: F,
+	) -> Result<R, ApiError>
+	where
+		Self: Sized;
+
+	/// Top-level keys written by the innermost open transaction of this instance, with their value
+	/// before it (resolved against the state `at`) and now. Child tries aren't included. Only keys
+	/// `keep` accepts are resolved; keys whose value didn't change are left out.
+	fn transaction_top_changes(
+		&self,
+		at: Block::Hash,
+		keep: &dyn Fn(&[u8]) -> bool,
+	) -> Result<TransactionChanges, ApiError>
+	where
+		Self: Sized;
+}
+
+/// A storage key written by a transaction.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChange {
+	/// The storage key.
+	pub key: Vec<u8>,
+	/// The value before the transaction; `None` if absent.
+	pub pre: Option<Vec<u8>>,
+	/// The value after it; `None` if removed.
+	pub post: Option<Vec<u8>>,
+}
+
+/// What one overlay transaction changed.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransactionChanges {
+	/// Keys whose value changed, ordered by key.
+	pub changes: Vec<KeyChange>,
+	/// Keys appended to on top of an earlier append, whose earlier value can't be recovered.
+	pub appended: Vec<Vec<u8>>,
 }
 
 /// Parameters for [`CallApiAt::call_api_at`].
